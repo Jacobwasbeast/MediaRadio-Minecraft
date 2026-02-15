@@ -20,6 +20,8 @@ import net.jacobwasbeast.mediaradio.mixin.ItemPropertiesAccessor;
 import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
 
+import java.util.List;
+
 public class MediaRadioClient {
 
     public static void initialize() {
@@ -45,7 +47,41 @@ public class MediaRadioClient {
     }
 
     public static void openHandRadioScreen(InteractionHand hand) {
-        Minecraft.getInstance().setScreen(RadioScreen.forHand(hand));
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player != null) {
+            ItemStack stack = minecraft.player.getItemInHand(hand);
+            if (stack.is(ModItems.RADIO_ITEM)) {
+                String radioId = RadioItem.getOrCreateRadioId(stack);
+                ClientMediaRepository repository = ClientMediaRepository.getInstance();
+                repository.setActiveRadioId(radioId);
+
+                String url = RadioItem.getSavedUrl(stack);
+                String title = RadioItem.getSavedTitle(stack);
+                String artist = RadioItem.getSavedArtist(stack);
+                String thumbnail = RadioItem.getSavedThumbnail(stack);
+                long position = RadioItem.getSavedPositionMs(stack);
+                float volume = RadioItem.getSavedVolume(stack);
+
+                if (!url.isBlank()) {
+                    String resolvedTitle = title.isBlank() ? url : title;
+                    var existing = repository.findByUrl(url);
+                    String mediaId;
+                    if (existing == null) {
+                        mediaId = repository.upsertMedia(url, resolvedTitle, artist, thumbnail, List.of()).id;
+                    } else {
+                        mediaId = existing.id;
+                    }
+
+                    if (repository.getQueueEntries().isEmpty()) {
+                        repository.enqueue(mediaId);
+                        repository.setQueueIndex(0);
+                    }
+
+                    ClientAudioEngine.getInstance().primeHandheldState(resolvedTitle, artist, thumbnail, position, volume);
+                }
+            }
+        }
+        minecraft.setScreen(RadioScreen.forHand(hand));
     }
 
     public static void openBlockRadioScreen(BlockPos blockPos) {

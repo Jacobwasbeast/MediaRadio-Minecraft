@@ -12,6 +12,7 @@ import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
 public class RadioBlockEntity extends BlockEntity {
 
     public static final String TAG_MEDIA_URL = "MediaUrl";
+    public static final String TAG_RADIO_ID = "RadioId";
     public static final String TAG_MEDIA_TITLE = "MediaTitle";
     public static final String TAG_MEDIA_ARTIST = "MediaArtist";
     public static final String TAG_MEDIA_THUMBNAIL = "MediaThumbnail";
@@ -21,6 +22,7 @@ public class RadioBlockEntity extends BlockEntity {
     public static final String TAG_VOLUME = "Volume";
 
     private String mediaUrl = "";
+    private String radioId = "";
     private String mediaTitle = "";
     private String mediaArtist = "";
     private String mediaThumbnail = "";
@@ -35,6 +37,15 @@ public class RadioBlockEntity extends BlockEntity {
 
     public String getMediaUrl() {
         return mediaUrl;
+    }
+
+    public String getRadioId() {
+        return radioId == null ? "" : radioId;
+    }
+
+    public void setRadioId(String radioId) {
+        this.radioId = safe(radioId);
+        sync();
     }
 
     public String getMediaTitle() {
@@ -138,6 +149,7 @@ public class RadioBlockEntity extends BlockEntity {
     @Override
     protected void saveAdditional(CompoundTag tag) {
         super.saveAdditional(tag);
+        tag.putString(TAG_RADIO_ID, radioId);
         tag.putString(TAG_MEDIA_URL, mediaUrl);
         tag.putString(TAG_MEDIA_TITLE, mediaTitle);
         tag.putString(TAG_MEDIA_ARTIST, mediaArtist);
@@ -151,6 +163,7 @@ public class RadioBlockEntity extends BlockEntity {
     @Override
     public void load(CompoundTag tag) {
         super.load(tag);
+        radioId = safe(tag.getString(TAG_RADIO_ID));
         mediaUrl = safe(tag.getString(TAG_MEDIA_URL));
         mediaTitle = safe(tag.getString(TAG_MEDIA_TITLE));
         mediaArtist = safe(tag.getString(TAG_MEDIA_ARTIST));

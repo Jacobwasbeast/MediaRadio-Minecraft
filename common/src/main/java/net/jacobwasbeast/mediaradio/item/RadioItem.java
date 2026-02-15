@@ -27,10 +27,12 @@ import net.jacobwasbeast.mediaradio.registry.ModBlocks;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
+import java.util.UUID;
 
 public class RadioItem extends Item {
 
     public static final String TAG_PLACE_MODE = "PlaceMode";
+    public static final String TAG_RADIO_ID = "RadioId";
     private static final String TAG_URL = "RadioUrl";
     private static final String TAG_TITLE = "RadioTitle";
     private static final String TAG_ARTIST = "RadioArtist";
@@ -50,6 +52,7 @@ public class RadioItem extends Item {
     @Override
     public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
+        ensureRadioId(stack);
 
         if (player.isShiftKeyDown()) {
             setPlaceMode(stack, !isPlaceMode(stack));
@@ -65,6 +68,11 @@ public class RadioItem extends Item {
             return InteractionResultHolder.sidedSuccess(stack, level.isClientSide);
         }
 
+        // In block placement mode, this item should only be used for placing.
+        if (isPlaceMode(stack)) {
+            return InteractionResultHolder.pass(stack);
+        }
+
         if (level.isClientSide) {
             MediaRadioClient.openHandRadioScreen(hand);
         }
@@ -75,6 +83,7 @@ public class RadioItem extends Item {
     @Override
     public InteractionResult useOn(UseOnContext context) {
         ItemStack stack = context.getItemInHand();
+        ensureRadioId(stack);
         Player player = context.getPlayer();
         if (player == null || !isPlaceMode(stack)) {
             return InteractionResult.PASS;
@@ -131,6 +140,12 @@ public class RadioItem extends Item {
 
     public static void writeBlockEntityData(ItemStack stack, RadioBlockEntity radioBlockEntity) {
         CompoundTag tag = stack.getOrCreateTag();
+        String radioId = radioBlockEntity.getRadioId();
+        if (radioId == null || radioId.isBlank()) {
+            radioId = UUID.randomUUID().toString();
+            radioBlockEntity.setRadioId(radioId);
+        }
+        tag.putString(TAG_RADIO_ID, radioId);
         tag.putString(TAG_URL, radioBlockEntity.getMediaUrl());
         tag.putString(TAG_TITLE, radioBlockEntity.getMediaTitle());
         tag.putString(TAG_ARTIST, radioBlockEntity.getMediaArtist());
@@ -144,6 +159,7 @@ public class RadioItem extends Item {
         if (tag == null) {
             return;
         }
+        radioBlockEntity.setRadioId(getOrCreateRadioId(stack));
         radioBlockEntity.setMedia(
                 getString(stack, TAG_URL),
                 getString(stack, TAG_TITLE),
@@ -161,5 +177,59 @@ public class RadioItem extends Item {
             return "";
         }
         return tag.getString(key);
+    }
+
+    public static String getSavedUrl(ItemStack stack) {
+        return getString(stack, TAG_URL);
+    }
+
+    public static String getSavedTitle(ItemStack stack) {
+        return getString(stack, TAG_TITLE);
+    }
+
+    public static String getSavedArtist(ItemStack stack) {
+        return getString(stack, TAG_ARTIST);
+    }
+
+    public static String getSavedThumbnail(ItemStack stack) {
+        return getString(stack, TAG_THUMBNAIL);
+    }
+
+    public static long getSavedPositionMs(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        if (tag == null) {
+            return 0L;
+        }
+        return Math.max(0L, tag.getLong(TAG_POSITION));
+    }
+
+    public static float getSavedVolume(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        if (tag == null || !tag.contains(TAG_VOLUME)) {
+            return 1.0f;
+        }
+        return Math.max(0.0f, Math.min(2.0f, tag.getFloat(TAG_VOLUME)));
+    }
+
+    public static String getOrCreateRadioId(ItemStack stack) {
+        CompoundTag tag = stack.getOrCreateTag();
+        String existing = tag.getString(TAG_RADIO_ID);
+        if (existing == null || existing.isBlank()) {
+            existing = UUID.randomUUID().toString();
+            tag.putString(TAG_RADIO_ID, existing);
+        }
+        return existing;
+    }
+
+    public static String getRadioId(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        if (tag == null) {
+            return "";
+        }
+        return tag.getString(TAG_RADIO_ID);
+    }
+
+    private static void ensureRadioId(ItemStack stack) {
+        getOrCreateRadioId(stack);
     }
 }

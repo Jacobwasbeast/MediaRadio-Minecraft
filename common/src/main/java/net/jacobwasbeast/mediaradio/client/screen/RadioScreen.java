@@ -5,8 +5,10 @@ import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
+import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
+import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -110,6 +112,8 @@ public class RadioScreen extends Screen {
         panelX = (width - PANEL_WIDTH) / 2;
         panelY = (height - PANEL_HEIGHT) / 2;
 
+        ClientMediaRepository.getInstance().setActiveRadioId(resolveActiveRadioId());
+
         if (isBlockMode()) {
             RadioBlockEntity blockEntity = getBlockEntity();
             if (blockEntity != null) {
@@ -119,6 +123,49 @@ public class RadioScreen extends Screen {
 
         clampSelections();
         rebuildRadioWidgets();
+    }
+
+    private String resolveActiveRadioId() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (isBlockMode()) {
+            RadioBlockEntity blockEntity = getBlockEntity();
+            if (blockEntity != null && blockEntity.getRadioId() != null && !blockEntity.getRadioId().isBlank()) {
+                return blockEntity.getRadioId();
+            }
+            // Client can briefly see an unsynced block entity after placement.
+            // Reuse current active/held radio id to avoid queue switching during place/pick transitions.
+            if (minecraft.player != null) {
+                var main = minecraft.player.getMainHandItem();
+                if (main.is(ModItems.RADIO_ITEM)) {
+                    String mainId = RadioItem.getRadioId(main);
+                    if (mainId != null && !mainId.isBlank()) {
+                        return mainId;
+                    }
+                }
+                var off = minecraft.player.getOffhandItem();
+                if (off.is(ModItems.RADIO_ITEM)) {
+                    String offId = RadioItem.getRadioId(off);
+                    if (offId != null && !offId.isBlank()) {
+                        return offId;
+                    }
+                }
+            }
+            String active = ClientMediaRepository.getInstance().getActiveRadioId();
+            return active == null || active.isBlank() ? "default" : active;
+        }
+
+        if (minecraft.player == null || hand == null) {
+            return "hand:unknown";
+        }
+        var stack = minecraft.player.getItemInHand(hand);
+        if (!stack.is(ModItems.RADIO_ITEM)) {
+            return "hand:" + hand.name().toLowerCase(Locale.ROOT);
+        }
+        String id = RadioItem.getRadioId(stack);
+        if (id == null || id.isBlank()) {
+            id = RadioItem.getOrCreateRadioId(stack);
+        }
+        return id;
     }
 
     @Override

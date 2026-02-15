@@ -93,7 +93,10 @@ public class ClientAudioEngine {
     }
 
     public String getHandheldNowPlaying() {
-        return handheldChannel == null ? "" : handheldChannel.getDisplayTitle();
+        if (handheldChannel != null) {
+            return handheldChannel.getDisplayTitle();
+        }
+        return handheldTitle;
     }
 
     public boolean isHandheldPlaying() {
@@ -133,6 +136,21 @@ public class ClientAudioEngine {
         handheldThumbnail = thumbnail == null ? "" : thumbnail;
         if (handheldChannel != null && !handheldTitle.isBlank()) {
             handheldChannel.setDisplayTitle(handheldTitle);
+        }
+    }
+
+    public void primeHandheldState(String title, String artist, String thumbnail, long positionMs, float volume) {
+        handheldTitle = title == null ? "" : title;
+        handheldArtist = artist == null ? "" : artist;
+        handheldThumbnail = thumbnail == null ? "" : thumbnail;
+        handheldVolume = Math.max(0f, Math.min(2f, volume));
+        if (handheldChannel != null) {
+            if (!handheldTitle.isBlank()) {
+                handheldChannel.setDisplayTitle(handheldTitle);
+            }
+            if (positionMs > 0L) {
+                handheldChannel.seekTo(positionMs, handheldChannel.isPaused());
+            }
         }
     }
 

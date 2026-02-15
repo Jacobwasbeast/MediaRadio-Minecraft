@@ -1,5 +1,7 @@
 package net.jacobwasbeast.mediaradio.client.data;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
@@ -10,16 +12,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 public class ClientMediaRepository {
 
     private static final ClientMediaRepository INSTANCE = new ClientMediaRepository();
+    private static final String DEFAULT_RADIO_ID = "default";
 
+    private final Gson gson = new Gson();
     private SharedMediaSnapshot snapshot = new SharedMediaSnapshot();
-    private final List<String> queueMediaIds = new ArrayList<>();
-    private int queueIndex = -1;
+    private final Map<String, QueueState> queuesByRadioId = new HashMap<>();
+    private String activeRadioId = DEFAULT_RADIO_ID;
 
     public static ClientMediaRepository getInstance() {
         return INSTANCE;
@@ -33,10 +39,21 @@ public class ClientMediaRepository {
         INSTANCE.applySnapshotJson(json, true);
     }
 
+    public synchronized void setActiveRadioId(String radioId) {
+        String safe = radioId == null || radioId.isBlank() ? DEFAULT_RADIO_ID : radioId;
+        activeRadioId = safe;
+        queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+        sanitizeQueue(activeQueueState());
+    }
+
+    public synchronized String getActiveRadioId() {
+        return activeRadioId;
+    }
+
     public synchronized void reset() {
         snapshot = new SharedMediaSnapshot();
-        queueMediaIds.clear();
-        queueIndex = -1;
+        queuesByRadioId.clear();
+        activeRadioId = DEFAULT_RADIO_ID;
     }
 
     public synchronized SharedMediaSnapshot getSnapshot() {
@@ -87,9 +104,9 @@ public class ClientMediaRepository {
     public synchronized void removeMedia(String mediaId) {
         snapshot.library.remove(mediaId);
         snapshot.playlists.values().forEach(playlist -> playlist.mediaIds.removeIf(mediaId::equals));
-        queueMediaIds.removeIf(mediaId::equals);
-        if (queueIndex >= queueMediaIds.size()) {
-            queueIndex = queueMediaIds.size() - 1;
+        for (QueueState queueState : queuesByRadioId.values()) {
+            queueState.queueMediaIds.removeIf(mediaId::equals);
+            sanitizeQueue(queueState);
         }
         persistAndUpload();
     }
@@ -126,36 +143,40 @@ public class ClientMediaRepository {
     }
 
     public synchronized void setQueueFromPlaylist(String playlistId) {
+        QueueState queueState = activeQueueState();
         SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
-        queueMediaIds.clear();
-        queueIndex = -1;
+        queueState.queueMediaIds.clear();
+        queueState.queueIndex = -1;
         if (playlistEntry == null || playlistEntry.mediaIds == null || playlistEntry.mediaIds.isEmpty()) {
             return;
         }
-        queueMediaIds.addAll(playlistEntry.mediaIds.stream().filter(snapshot.library::containsKey).toList());
-        queueIndex = queueMediaIds.isEmpty() ? -1 : 0;
+        queueState.queueMediaIds.addAll(playlistEntry.mediaIds.stream().filter(snapshot.library::containsKey).toList());
+        queueState.queueIndex = queueState.queueMediaIds.isEmpty() ? -1 : 0;
     }
 
     public synchronized void enqueue(String mediaId) {
+        QueueState queueState = activeQueueState();
         if (!snapshot.library.containsKey(mediaId)) {
             return;
         }
-        queueMediaIds.add(mediaId);
-        if (queueIndex < 0) {
-            queueIndex = 0;
+        queueState.queueMediaIds.add(mediaId);
+        if (queueState.queueIndex < 0) {
+            queueState.queueIndex = 0;
         }
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry getCurrentQueueEntry() {
-        if (queueIndex < 0 || queueIndex >= queueMediaIds.size()) {
+        QueueState queueState = activeQueueState();
+        if (queueState.queueIndex < 0 || queueState.queueIndex >= queueState.queueMediaIds.size()) {
             return null;
         }
-        return snapshot.library.get(queueMediaIds.get(queueIndex));
+        return snapshot.library.get(queueState.queueMediaIds.get(queueState.queueIndex));
     }
 
     public synchronized List<SharedMediaSnapshot.MediaEntry> getQueueEntries() {
+        QueueState queueState = activeQueueState();
         List<SharedMediaSnapshot.MediaEntry> entries = new ArrayList<>();
-        for (String mediaId : queueMediaIds) {
+        for (String mediaId : queueState.queueMediaIds) {
             SharedMediaSnapshot.MediaEntry entry = snapshot.library.get(mediaId);
             if (entry != null) {
                 entries.add(entry);
@@ -165,73 +186,69 @@ public class ClientMediaRepository {
     }
 
     public synchronized int getQueueIndex() {
-        return queueIndex;
+        return activeQueueState().queueIndex;
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry setQueueIndex(int index) {
-        if (index < 0 || index >= queueMediaIds.size()) {
+        QueueState queueState = activeQueueState();
+        if (index < 0 || index >= queueState.queueMediaIds.size()) {
             return null;
         }
-        queueIndex = index;
+        queueState.queueIndex = index;
         return getCurrentQueueEntry();
     }
 
     public synchronized void removeQueueIndex(int index) {
-        if (index < 0 || index >= queueMediaIds.size()) {
+        QueueState queueState = activeQueueState();
+        if (index < 0 || index >= queueState.queueMediaIds.size()) {
             return;
         }
 
-        queueMediaIds.remove(index);
-        if (queueMediaIds.isEmpty()) {
-            queueIndex = -1;
-            return;
-        }
-
-        if (queueIndex > index) {
-            queueIndex--;
-        } else if (queueIndex >= queueMediaIds.size()) {
-            queueIndex = queueMediaIds.size() - 1;
-        }
+        queueState.queueMediaIds.remove(index);
+        sanitizeQueue(queueState);
     }
 
     public synchronized void moveQueueIndex(int fromIndex, int toIndex) {
-        if (fromIndex < 0 || fromIndex >= queueMediaIds.size() || toIndex < 0 || toIndex >= queueMediaIds.size()) {
+        QueueState queueState = activeQueueState();
+        if (fromIndex < 0 || fromIndex >= queueState.queueMediaIds.size() || toIndex < 0 || toIndex >= queueState.queueMediaIds.size()) {
             return;
         }
         if (fromIndex == toIndex) {
             return;
         }
 
-        String mediaId = queueMediaIds.remove(fromIndex);
-        queueMediaIds.add(toIndex, mediaId);
+        String mediaId = queueState.queueMediaIds.remove(fromIndex);
+        queueState.queueMediaIds.add(toIndex, mediaId);
 
-        if (queueIndex == fromIndex) {
-            queueIndex = toIndex;
-        } else if (fromIndex < queueIndex && toIndex >= queueIndex) {
-            queueIndex--;
-        } else if (fromIndex > queueIndex && toIndex <= queueIndex) {
-            queueIndex++;
+        if (queueState.queueIndex == fromIndex) {
+            queueState.queueIndex = toIndex;
+        } else if (fromIndex < queueState.queueIndex && toIndex >= queueState.queueIndex) {
+            queueState.queueIndex--;
+        } else if (fromIndex > queueState.queueIndex && toIndex <= queueState.queueIndex) {
+            queueState.queueIndex++;
         }
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry nextQueueEntry() {
-        if (queueMediaIds.isEmpty()) {
+        QueueState queueState = activeQueueState();
+        if (queueState.queueMediaIds.isEmpty()) {
             return null;
         }
-        queueIndex++;
-        if (queueIndex >= queueMediaIds.size()) {
-            queueIndex = 0;
+        queueState.queueIndex++;
+        if (queueState.queueIndex >= queueState.queueMediaIds.size()) {
+            queueState.queueIndex = 0;
         }
         return getCurrentQueueEntry();
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry previousQueueEntry() {
-        if (queueMediaIds.isEmpty()) {
+        QueueState queueState = activeQueueState();
+        if (queueState.queueMediaIds.isEmpty()) {
             return null;
         }
-        queueIndex--;
-        if (queueIndex < 0) {
-            queueIndex = queueMediaIds.size() - 1;
+        queueState.queueIndex--;
+        if (queueState.queueIndex < 0) {
+            queueState.queueIndex = queueState.queueMediaIds.size() - 1;
         }
         return getCurrentQueueEntry();
     }
@@ -242,6 +259,9 @@ public class ClientMediaRepository {
 
     private synchronized void applySnapshotJson(String json, boolean saveCache) {
         snapshot = SharedMediaSnapshot.fromJson(json);
+        for (QueueState queueState : queuesByRadioId.values()) {
+            sanitizeQueue(queueState);
+        }
         if (saveCache) {
             saveCache();
         }
@@ -249,6 +269,9 @@ public class ClientMediaRepository {
 
     private synchronized void persistAndUpload() {
         snapshot.sanitize();
+        for (QueueState queueState : queuesByRadioId.values()) {
+            sanitizeQueue(queueState);
+        }
         saveCache();
         ModNetworking.uploadSharedSnapshot(snapshot.toJson());
     }
@@ -260,23 +283,128 @@ public class ClientMediaRepository {
         }
         try {
             String json = Files.readString(cacheFile);
-            applySnapshotJson(json, false);
+            tryLoadCache(json);
         } catch (IOException exception) {
             MediaRadio.LOGGER.warn("Failed to load client media cache", exception);
         }
     }
 
-    private void saveCache() {
+    private synchronized void tryLoadCache(String json) {
+        try {
+            CacheModel cacheModel = gson.fromJson(json, CacheModel.class);
+            if (cacheModel != null) {
+                if (cacheModel.snapshotJson != null && !cacheModel.snapshotJson.isBlank()) {
+                    snapshot = SharedMediaSnapshot.fromJson(cacheModel.snapshotJson);
+                }
+
+                activeRadioId = cacheModel.activeRadioId == null || cacheModel.activeRadioId.isBlank() ? DEFAULT_RADIO_ID : cacheModel.activeRadioId;
+                queuesByRadioId.clear();
+                if (cacheModel.queuesByRadioId != null) {
+                    for (Map.Entry<String, QueueStateModel> entry : cacheModel.queuesByRadioId.entrySet()) {
+                        QueueStateModel model = entry.getValue();
+                        QueueState queueState = new QueueState();
+                        if (model != null && model.queueMediaIds != null) {
+                            queueState.queueMediaIds.addAll(model.queueMediaIds);
+                        }
+                        queueState.queueIndex = model == null ? -1 : model.queueIndex;
+                        sanitizeQueue(queueState);
+                        queuesByRadioId.put(entry.getKey(), queueState);
+                    }
+                }
+
+                // Migration from previous per-radio cache format.
+                if ((cacheModel.snapshotJson == null || cacheModel.snapshotJson.isBlank()) && cacheModel.radios != null && !cacheModel.radios.isEmpty()) {
+                    RadioStateModel active = cacheModel.radios.get(activeRadioId);
+                    if (active == null) {
+                        active = cacheModel.radios.values().stream().findFirst().orElse(null);
+                    }
+                    if (active != null && active.snapshotJson != null) {
+                        snapshot = SharedMediaSnapshot.fromJson(active.snapshotJson);
+                    }
+                    for (Map.Entry<String, RadioStateModel> entry : cacheModel.radios.entrySet()) {
+                        QueueState queueState = new QueueState();
+                        RadioStateModel model = entry.getValue();
+                        if (model != null && model.queueMediaIds != null) {
+                            queueState.queueMediaIds.addAll(model.queueMediaIds);
+                        }
+                        queueState.queueIndex = model == null ? -1 : model.queueIndex;
+                        sanitizeQueue(queueState);
+                        queuesByRadioId.put(entry.getKey(), queueState);
+                    }
+                }
+
+                queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+                return;
+            }
+        } catch (JsonSyntaxException ignored) {
+        }
+
+        // Backward compatibility with the oldest single-snapshot cache format.
+        snapshot = SharedMediaSnapshot.fromJson(json);
+        queuesByRadioId.clear();
+        queuesByRadioId.put(DEFAULT_RADIO_ID, new QueueState());
+        activeRadioId = DEFAULT_RADIO_ID;
+    }
+
+    private synchronized void saveCache() {
         Path cacheFile = getCacheFile();
         try {
             Files.createDirectories(Objects.requireNonNull(cacheFile.getParent()));
-            Files.writeString(cacheFile, snapshot.toJson());
+            CacheModel model = new CacheModel();
+            model.activeRadioId = activeRadioId;
+            model.snapshotJson = snapshot.toJson();
+            model.queuesByRadioId = new HashMap<>();
+            for (Map.Entry<String, QueueState> entry : queuesByRadioId.entrySet()) {
+                QueueState queueState = entry.getValue();
+                QueueStateModel queueModel = new QueueStateModel();
+                queueModel.queueMediaIds = new ArrayList<>(queueState.queueMediaIds);
+                queueModel.queueIndex = queueState.queueIndex;
+                model.queuesByRadioId.put(entry.getKey(), queueModel);
+            }
+            Files.writeString(cacheFile, gson.toJson(model));
         } catch (IOException exception) {
             MediaRadio.LOGGER.warn("Failed to save client media cache", exception);
         }
     }
 
+    private synchronized QueueState activeQueueState() {
+        return queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+    }
+
+    private void sanitizeQueue(QueueState queueState) {
+        queueState.queueMediaIds.removeIf(mediaId -> !snapshot.library.containsKey(mediaId));
+        if (queueState.queueMediaIds.isEmpty()) {
+            queueState.queueIndex = -1;
+        } else if (queueState.queueIndex < 0 || queueState.queueIndex >= queueState.queueMediaIds.size()) {
+            queueState.queueIndex = 0;
+        }
+    }
+
     private Path getCacheFile() {
         return Minecraft.getInstance().gameDirectory.toPath().resolve("config").resolve("mediaradio-client-cache.json");
+    }
+
+    private static class QueueState {
+        private final List<String> queueMediaIds = new ArrayList<>();
+        private int queueIndex = -1;
+    }
+
+    private static class CacheModel {
+        private String activeRadioId;
+        private String snapshotJson;
+        private Map<String, QueueStateModel> queuesByRadioId;
+        // legacy per-radio cache format from previous build
+        private Map<String, RadioStateModel> radios;
+    }
+
+    private static class QueueStateModel {
+        private List<String> queueMediaIds;
+        private int queueIndex;
+    }
+
+    private static class RadioStateModel {
+        private String snapshotJson;
+        private List<String> queueMediaIds;
+        private int queueIndex;
     }
 }
