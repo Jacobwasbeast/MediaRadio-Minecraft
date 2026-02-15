@@ -1,0 +1,35 @@
+{
+  "parent": "mediaradio:block/radio_block",
+  "display": {
+    "thirdperson_righthand": {
+      "rotation": [0, 84, 50],
+      "translation": [0.8, 2.0, 0.8],
+      "scale": [0.78, 0.78, 0.78]
+    },
+    "thirdperson_lefthand": {
+      "rotation": [0, -95, -45],
+      "translation": [0.8, 2.0, -0.8],
+      "scale": [0.78, 0.78, 0.78]
+    },
+    "firstperson_righthand": {
+      "rotation": [0, 50, 12],
+      "translation": [0.95, 2.2, 0.65],
+      "scale": [0.78, 0.78, 0.78]
+    },
+    "firstperson_lefthand": {
+      "rotation": [0, -102, -38],
+      "translation": [0.25, 3.2, 0.1],
+      "scale": [0.78, 0.78, 0.78]
+    },
+    "ground": {
+      "rotation": [0, 0, 0],
+      "translation": [0, 2, 0],
+      "scale": [0.52, 0.52, 0.52]
+    },
+    "gui": {
+      "rotation": [30, 45, 0],
+      "translation": [0, 0, 0],
+      "scale": [0.84, 0.84, 0.84]
+    }
+  }
+}

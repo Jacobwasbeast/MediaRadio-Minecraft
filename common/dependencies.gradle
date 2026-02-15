@@ -1,0 +1,9 @@
+dependencies {
+    implementation("net.blay09.mods:balm-common:${balm_version}") {
+        exclude(group: "net.blay09.mods", module: "shared-bridge")
+        changing = balm_version.endsWith("SNAPSHOT")
+    }
+    implementation("net.blay09.mods:kuma-api-common:${kuma_version}")
+    implementation("dev.arbjerg:lavaplayer:2.2.6")
+    implementation("dev.lavalink.youtube:v2:1.17.0")
+}
