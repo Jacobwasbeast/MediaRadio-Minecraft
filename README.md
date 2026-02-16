@@ -1,61 +1,57 @@
-# Balm Mod Template
+# Media Radio
 
-This is a template project that can be used to setup a multi-loader Minecraft Mod development environment with Balm.
+Media Radio is a multi-loader Minecraft mod for **1.20.1** that adds a functional radio item and placeable radio block with in-world playback controls.
 
-The gradle setup is heavily based on [Jared's MultiLoader Template](https://github.com/jaredlll08/MultiLoader-Template).
+## Features
 
-## Getting Started
+- Single radio item with handheld and placement behavior
+- Handheld playback
+- Offhand use
+- Block placement mode
+- Placeable radio block with on-model media overlay (status/title/artist/time/volume/thumbnail)
+- 3D positional audio for placed radios
+- Queue controls (play, prev, next, remove, reorder)
+- Shuffle and loop modes
+- Playlist system with import flows (including YouTube/global/invites UI paths)
+- Source management UI for adding media from multiple source types
+- Thumbnails shown across now playing, queue, library, and overlays
 
-- Click "Use this template" on GitHub to create a new repository based on this template.
-- Clone the repository to your local machine.
-- Open the project in IntelliJ IDEA.
-- Open `gradle.properties` and configure your mod's metadata.
-- Now that you've set a mod id, you should rename all instances of `yourmod` and `YourMod` to your mod id / name, both
-  in code and in file names.
-- The majority of code lies in the `common` folder, while the mod-loader specific folders are only needed for
-  implementing third party mod compatibility.
-- The template includes a basic example for most of Balm's features. Delete parts that you don't need before releasing
-  your mod.
-- Don't forget to replace your mod's logo in `common/src/main/resources/yourmod-icon.png`.
+## Controls
 
-If you need to add dependencies, do so in `dependencies.gradle`. I recommend leaving the `build.gradle` files untouched
-to make updating to newer versions of the template easier.
+- `Shift + Right Click` with radio item: toggle handheld/place mode
+- `Right Click` with radio item in handheld mode: open radio UI
+- `Right Click` with radio item in place mode: place radio block
+- `Shift + Right Click` on placed radio block: pick radio up
 
-## Structure
+## Data Behavior
 
-### gradle.properties
+- Playlist data is global for the player profile.
+- Queue/playback state is tied to each radio ID so different radios can keep separate queues/states.
+- Picking up and placing a radio preserves the same radio identity/state flow.
 
-Configure the mod's metadata as well as any mod loader or dependency versions in this file.
+## Source Notes
 
-Ideally, you should never make changes to `build.gradle` directly.
+- Supports direct URLs/files and YouTube-driven flows in UI.
+- YouTube behavior can change when upstream extractor/provider APIs change.
 
-### CHANGELOG.md
+## Crafting
 
-This file is used as a changelog for uploads to Modrinth and CurseForge.
+See `Recipe.md` for all current crafting patterns and ingredient keys.
 
-### LICENSE
+## Development
 
-You should replace this file with a license of your choice.
+### Build / Compile
 
-Unless you fully understand the implications of the license you choose, you should keep this as All Rights Reserved.
+Use your normal Gradle workflow for your platform and Java setup.
+Compile all modules (`common`, `fabric`, `forge`) before release.
 
-### modpage.md
+### Project Layout
 
-This is used for Modrinth's `modrinthSyncBody` gradle task, updating the Modrinth project page to match the Markdown
-file.
+- `common/`: shared gameplay, UI, audio, networking, rendering, data
+- `fabric/`: Fabric entrypoints/integration
+- `forge/`: Forge entrypoints/integration
 
-### repositories.gradle
+## License
 
-This is where Maven repositories for fetching dependencies are configured.
-It is good practice to filter each repository to only the groups you expect to download from them.
-
-## Contributing
-
-If you're interested in contributing to the mod, you can check
-out [issues labelled as "help wanted"](https://github.com/TwelveIterations/balm-mod/issues?q=is%3Aopen+is%3Aissue+label%3A%22help+wanted%22).
-
-When it comes to new features, it's best to confer with me first to ensure we share the same vision. You can join us
-on [Discord](https://discord.gg/VAfZ2Nau6j) if you'd like to talk.
-
-Contributions must be done through pull requests. I will not be able to accept translations, code or other assets
-through any other channels.
+This project is licensed under the **MIT License**.
+See `LICENSE` for full terms.
