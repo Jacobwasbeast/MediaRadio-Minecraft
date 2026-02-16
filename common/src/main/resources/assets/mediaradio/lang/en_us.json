@@ -3,6 +3,7 @@
   "item.mediaradio.display": "Display",
   "item.mediaradio.radio": "Media Radio",
   "block.mediaradio.radio_block": "Media Radio",
+  "itemGroup.mediaradio.mediaradio": "Media Radio",
   "itemGroup.mediaradio": "Media Radio",
   "key.mediaradio.open_radio": "Open Radio",
   "category.mediaradio": "Media Radio"
