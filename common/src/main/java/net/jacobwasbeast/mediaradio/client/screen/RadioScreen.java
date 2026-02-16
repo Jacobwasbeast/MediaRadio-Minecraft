@@ -2,6 +2,7 @@ package net.jacobwasbeast.mediaradio.client.screen;
 
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
+import net.jacobwasbeast.mediaradio.client.audio.LavaPlayerAccess;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
 import net.jacobwasbeast.mediaradio.client.media.PlaybackDisplayResolver;
@@ -27,6 +28,7 @@ import net.minecraft.world.InteractionHand;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.ArrayList;
 
 public class RadioScreen extends Screen {
 
@@ -42,6 +44,8 @@ public class RadioScreen extends Screen {
     private static final int MEDIA_ROW_HEIGHT = 30;
     private static final int MEDIA_THUMB_SIZE = 24;
     private static final int PLAYLIST_ROW_HEIGHT = 20;
+    private static final int SOURCE_ROW_HEIGHT = 34;
+    private static final int SOURCE_THUMB_SIZE = 30;
 
     private static final int COLOR_BG_TOP = 0xEC070A0D;
     private static final int COLOR_BG_BOTTOM = 0xF0010205;
@@ -63,6 +67,8 @@ public class RadioScreen extends Screen {
     private final InteractionHand hand;
 
     private Tab tab = Tab.NOW;
+    private LibraryView libraryView = LibraryView.BROWSE;
+    private SourceMode sourceMode = SourceMode.YOUTUBE_SEARCH;
 
     private EditBox urlInput;
     private EditBox titleInput;
@@ -81,6 +87,7 @@ public class RadioScreen extends Screen {
     private int libraryScroll;
     private int playlistScroll;
     private int playlistTrackScroll;
+    private int sourceResultScroll;
 
     private String selectedPlaylistId = "";
 
@@ -98,6 +105,10 @@ public class RadioScreen extends Screen {
     private String lastPersistedQueueState = "";
     private String lastPersistedRuntimeKey = "";
     private String lastBoundBlockRadioId = "";
+    private final List<LavaPlayerAccess.SearchResult> sourceSearchResults = new ArrayList<>();
+    private int selectedSourceResultIndex = -1;
+    private boolean sourceSearchLoading;
+    private String sourceStatusMessage = "Choose a source mode, then search or add.";
 
     private RadioScreen(BlockPos blockPos, InteractionHand hand) {
         super(Component.literal("Media Radio"));
@@ -291,38 +302,70 @@ public class RadioScreen extends Screen {
         int y = contentY();
         int w = contentW();
 
-        urlInput = createInput(x + 8, y + 22, w - 16, 20, "Paste URL or source identifier");
-        urlInput.setHint(Component.literal("Paste URL or source identifier"));
-        urlInput.setValue(draftUrl);
-        addRenderableWidget(urlInput);
+        if (libraryView == LibraryView.SOURCES) {
+            buildLibrarySourcesPage();
+            return;
+        }
 
-        int halfGap = 8;
-        int halfW = (w - 16 - halfGap) / 2;
-        titleInput = createInput(x + 8, y + 48, halfW, 20, "Custom title");
-        titleInput.setHint(Component.literal("Custom title"));
-        titleInput.setValue(draftTitle);
-        addRenderableWidget(titleInput);
-
-        artistInput = createInput(x + 8 + halfW + halfGap, y + 48, halfW, 20, "Custom artist");
-        artistInput.setHint(Component.literal("Custom artist"));
-        artistInput.setValue(draftArtist);
-        addRenderableWidget(artistInput);
-
-        thumbnailInput = createInput(x + 8, y + 74, w - 16, 20, "Thumbnail URL (optional)");
-        thumbnailInput.setHint(Component.literal("Thumbnail URL (optional)"));
-        thumbnailInput.setValue(draftThumbnail);
-        addRenderableWidget(thumbnailInput);
-
-        int sourceButtonY = y + 98;
-        addRenderableWidget(new StyledButton(x + 8, sourceButtonY, 126, 20, Component.literal("▶ Play Now"), this::playFromInputs, true, false));
-        addRenderableWidget(new StyledButton(x + 140, sourceButtonY, 154, 20, Component.literal("💾 Save To Library"), this::addInputToLibrary, false, false));
-        addRenderableWidget(new StyledButton(x + 300, sourceButtonY, 126, 20, Component.literal("➕ Queue URL"), this::queueInputFromInputs, false, false));
+        addRenderableWidget(new StyledButton(x + w - 178, y, 178, 20, Component.literal("＋ Add From Sources"), this::openSourcesPage, true, false));
 
         int controlsY = panelY + PANEL_HEIGHT - 34;
         addRenderableWidget(new StyledButton(x, controlsY, 132, 22, Component.literal("▶ Play Selected"), this::playSelectedLibrary, true, false));
         addRenderableWidget(new StyledButton(x + 138, controlsY, 124, 22, Component.literal("➕ Add To Queue"), this::enqueueSelectedLibrary, false, false));
         addRenderableWidget(new StyledButton(x + 268, controlsY, 90, 22, Component.literal("🗑 Delete"), this::removeSelectedLibrary, false, false));
         addRenderableWidget(new StyledButton(x + 364, controlsY, 134, 22, Component.literal("≡ Add To Playlist"), this::addSelectedLibraryToPlaylist, false, false));
+    }
+
+    private void buildLibrarySourcesPage() {
+        int x = contentX();
+        int y = contentY();
+        int w = contentW();
+        int modeY = y;
+        int modeButtonW = 118;
+        int modeGap = 6;
+        int sourceInputTop = y + 42;
+
+        addRenderableWidget(new StyledButton(x + 8, modeY, modeButtonW, 20, Component.literal("YouTube Search"), () -> setSourceMode(SourceMode.YOUTUBE_SEARCH), false, sourceMode == SourceMode.YOUTUBE_SEARCH));
+        addRenderableWidget(new StyledButton(x + 8 + modeButtonW + modeGap, modeY, modeButtonW, 20, Component.literal("YouTube URL"), () -> setSourceMode(SourceMode.YOUTUBE_URL), false, sourceMode == SourceMode.YOUTUBE_URL));
+        addRenderableWidget(new StyledButton(x + 8 + ((modeButtonW + modeGap) * 2), modeY, modeButtonW, 20, Component.literal("Direct URL/File"), () -> setSourceMode(SourceMode.DIRECT_URL_OR_FILE), false, sourceMode == SourceMode.DIRECT_URL_OR_FILE));
+        addRenderableWidget(new StyledButton(x + w - 106, modeY, 106, 20, Component.literal("◀ Back"), this::closeSourcesPage, true, false));
+
+        urlInput = createInput(x + 8, sourceInputTop, w - 16, 20, sourceMode.inputLabel);
+        urlInput.setHint(Component.literal(sourceMode.inputHint));
+        urlInput.setValue(draftUrl);
+        addRenderableWidget(urlInput);
+
+        int halfGap = 8;
+        int halfW = (w - 16 - halfGap) / 2;
+        titleInput = createInput(x + 8, sourceInputTop + 26, halfW, 20, "Custom title (optional)");
+        titleInput.setHint(Component.literal("Custom title (optional)"));
+        titleInput.setValue(draftTitle);
+        addRenderableWidget(titleInput);
+
+        artistInput = createInput(x + 8 + halfW + halfGap, sourceInputTop + 26, halfW, 20, "Custom artist (optional)");
+        artistInput.setHint(Component.literal("Custom artist (optional)"));
+        artistInput.setValue(draftArtist);
+        addRenderableWidget(artistInput);
+
+        thumbnailInput = createInput(x + 8, sourceInputTop + 52, w - 16, 20, "Thumbnail URL (optional)");
+        thumbnailInput.setHint(Component.literal("Thumbnail URL (optional)"));
+        thumbnailInput.setValue(draftThumbnail);
+        addRenderableWidget(thumbnailInput);
+
+        int actionY = sourceInputTop + 78;
+        int actionGap = 6;
+        int actionW = (w - 16 - (actionGap * 3)) / 4;
+        if (sourceMode == SourceMode.YOUTUBE_SEARCH) {
+            addRenderableWidget(new StyledButton(x + 8, actionY, actionW, 20, Component.literal("🔎 Search"), this::searchYoutubeFromInput, true, false));
+            addRenderableWidget(new StyledButton(x + 8 + actionW + actionGap, actionY, actionW, 20, Component.literal("▶ Play Result"), this::playSelectedSearchResult, false, false));
+            addRenderableWidget(new StyledButton(x + 8 + ((actionW + actionGap) * 2), actionY, actionW, 20, Component.literal("➕ Queue Result"), this::queueSelectedSearchResult, false, false));
+            addRenderableWidget(new StyledButton(x + 8 + ((actionW + actionGap) * 3), actionY, actionW, 20, Component.literal("💾 Save Result"), this::saveSelectedSearchResult, false, false));
+        } else {
+            addRenderableWidget(new StyledButton(x + 8, actionY, actionW, 20, Component.literal("▶ Play Now"), this::playFromInputs, true, false));
+            addRenderableWidget(new StyledButton(x + 8 + actionW + actionGap, actionY, actionW, 20, Component.literal("➕ Queue Source"), this::queueInputFromInputs, false, false));
+            addRenderableWidget(new StyledButton(x + 8 + ((actionW + actionGap) * 2), actionY, actionW, 20, Component.literal("💾 Save Source"), this::addInputToLibrary, false, false));
+            addRenderableWidget(new StyledButton(x + 8 + ((actionW + actionGap) * 3), actionY, actionW, 20, Component.literal("🔎 Resolve Meta"), this::resolveSourceMetadata, false, false));
+        }
     }
 
     private void buildPlaylistsTab() {
@@ -450,20 +493,26 @@ public class RadioScreen extends Screen {
     }
 
     private void renderLibraryTab(GuiGraphics guiGraphics) {
+        if (libraryView == LibraryView.SOURCES) {
+            renderLibrarySourcesPage(guiGraphics);
+            return;
+        }
+        renderLibraryBrowsePage(guiGraphics);
+    }
+
+    private void renderLibraryBrowsePage(GuiGraphics guiGraphics) {
         int x = contentX();
         int y = contentY();
         int w = contentW();
-        int h = contentH();
+        int controlsY = panelY + PANEL_HEIGHT - 34;
+        int listY = y + 24;
+        int listH = Math.max(MEDIA_ROW_HEIGHT + 40, (controlsY - 8) - listY);
 
-        guiGraphics.fill(x, y, x + w, y + 118, COLOR_CARD_SOFT);
-        drawOutline(guiGraphics, x, y, w, 118, 0x6653768F);
-        guiGraphics.drawString(font, "Add Source", x + 8, y + 8, COLOR_ACCENT, false);
-
-        int listY = y + 126;
-        int listH = h - 156;
+        guiGraphics.drawString(font, "Library", x + 4, y + 6, COLOR_ACCENT, false);
+        guiGraphics.drawString(font, "Use Add From Sources to import/search new media", x + 64, y + 6, COLOR_MUTED, false);
         guiGraphics.fill(x, listY, x + w, listY + listH, COLOR_CARD);
         drawOutline(guiGraphics, x, listY, w, listH, 0x6653768F);
-        guiGraphics.drawString(font, "Library", x + 8, listY + 8, COLOR_ACCENT, false);
+        guiGraphics.drawString(font, "Saved Tracks", x + 8, listY + 8, COLOR_ACCENT, false);
 
         List<SharedMediaSnapshot.MediaEntry> entries = ClientMediaRepository.getInstance().getSortedLibrary();
         int rowStartY = listY + 24;
@@ -491,6 +540,74 @@ public class RadioScreen extends Screen {
         if (selectedLibraryIndex >= 0 && selectedLibraryIndex < entries.size()) {
             SharedMediaSnapshot.MediaEntry entry = entries.get(selectedLibraryIndex);
             guiGraphics.drawString(font, trim(entry.url, 68), x + 90, listY + listH - 16, COLOR_MUTED, false);
+        }
+    }
+
+    private void renderLibrarySourcesPage(GuiGraphics guiGraphics) {
+        int x = contentX();
+        int y = contentY();
+        int w = contentW();
+        int h = contentH();
+
+        int sourcePanelY = y + 22;
+        int sourcePanelH = 124;
+        guiGraphics.fill(x, sourcePanelY, x + w, sourcePanelY + sourcePanelH, COLOR_CARD_SOFT);
+        drawOutline(guiGraphics, x, sourcePanelY, w, sourcePanelH, 0x6653768F);
+        guiGraphics.drawString(font, "Sources: " + sourceMode.displayName, x + 8, sourcePanelY + 6, COLOR_ACCENT, false);
+        guiGraphics.drawString(font, sourceMode.helperText, x + 152, sourcePanelY + 6, COLOR_MUTED, false);
+
+        int listY = y + 152;
+        int listH = Math.max(SOURCE_ROW_HEIGHT + 36, h - 152);
+        guiGraphics.fill(x, listY, x + w, listY + listH, COLOR_CARD);
+        drawOutline(guiGraphics, x, listY, w, listH, 0x6653768F);
+
+        if (sourceMode == SourceMode.YOUTUBE_SEARCH) {
+            guiGraphics.drawString(font, "YouTube Results", x + 8, listY + 8, COLOR_ACCENT, false);
+            int statusColor = sourceSearchLoading ? COLOR_ACCENT_ALT : COLOR_MUTED;
+            guiGraphics.drawString(font, trim(sourceStatusMessage, 68), x + 118, listY + 8, statusColor, false);
+
+            int rowStartY = listY + 24;
+            int maxRows = sourceVisibleRows(listH);
+            int start = clampScroll(sourceResultScroll, sourceSearchResults.size(), maxRows);
+            sourceResultScroll = start;
+            int end = Math.min(sourceSearchResults.size(), start + maxRows);
+
+            for (int i = 0, index = start; index < end; i++, index++) {
+                LavaPlayerAccess.SearchResult result = sourceSearchResults.get(index);
+                int lineTop = rowStartY + i * SOURCE_ROW_HEIGHT;
+                boolean selected = index == selectedSourceResultIndex;
+                if (selected) {
+                    guiGraphics.fill(x + 6, lineTop - 1, x + w - 6, lineTop + SOURCE_ROW_HEIGHT - 1, 0xAA365D77);
+                }
+
+                drawListThumbnail(
+                        guiGraphics,
+                        MediaMetadataResolver.bestThumbnail(result.thumbnail(), result.identifier()),
+                        x + 10,
+                        rowThumbY(lineTop, SOURCE_ROW_HEIGHT, SOURCE_THUMB_SIZE),
+                        SOURCE_THUMB_SIZE
+                );
+
+                String duration = result.durationMs() > 0L ? formatTime(result.durationMs()) : "--:--";
+                guiGraphics.drawString(font, trim(result.title(), 54), x + 46, lineTop + 6, selected ? 0xFFFFFFFF : COLOR_TEXT, false);
+                guiGraphics.drawString(font, trim(result.artist().isBlank() ? "Unknown Artist" : result.artist(), 40), x + 46, lineTop + 16, COLOR_MUTED, false);
+                guiGraphics.drawString(font, duration, x + w - 44, lineTop + 6, COLOR_MUTED, false);
+            }
+            guiGraphics.drawString(font, "Results: " + sourceSearchResults.size(), x + 8, listY + listH - 16, COLOR_MUTED, false);
+        } else {
+            guiGraphics.drawString(font, "Source Preview", x + 8, listY + 8, COLOR_ACCENT, false);
+            guiGraphics.drawString(font, "This mode accepts direct media URLs and local file paths.", x + 8, listY + 22, COLOR_MUTED, false);
+            guiGraphics.drawString(font, "Play/Queue/Save happens immediately without closing this menu.", x + 8, listY + 34, COLOR_MUTED, false);
+
+            String sourceValue = urlInput == null ? "" : urlInput.getValue().trim();
+            if (sourceValue.isBlank()) {
+                guiGraphics.drawString(font, "No source entered yet.", x + 8, listY + 54, COLOR_MUTED, false);
+            } else {
+                guiGraphics.drawString(font, "Source:", x + 8, listY + 54, COLOR_ACCENT_ALT, false);
+                guiGraphics.drawString(font, trim(sourceValue, 78), x + 56, listY + 54, COLOR_TEXT, false);
+                guiGraphics.drawString(font, "Title: " + trim(titleInput == null ? "" : titleInput.getValue().trim(), 48), x + 8, listY + 68, COLOR_MUTED, false);
+                guiGraphics.drawString(font, "Artist: " + trim(artistInput == null ? "" : artistInput.getValue().trim(), 48), x + 8, listY + 80, COLOR_MUTED, false);
+            }
         }
     }
 
@@ -577,19 +694,42 @@ public class RadioScreen extends Screen {
         }
 
         if (tab == Tab.LIBRARY) {
-            int x = contentX();
-            int listY = contentY() + 126;
-            int w = contentW();
-            int listH = contentH() - 156;
-            int rowStartY = listY + 24;
-            if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
-                int row = (int) ((mouseY - (listY + 24)) / MEDIA_ROW_HEIGHT);
-                int maxRows = libraryVisibleRows(listH);
-                int index = libraryScroll + row;
-                int size = ClientMediaRepository.getInstance().getSortedLibrary().size();
-                if (row >= 0 && row < maxRows && index >= 0 && index < size) {
-                    selectedLibraryIndex = index;
-                    return true;
+            if (libraryView == LibraryView.SOURCES) {
+                if (sourceMode == SourceMode.YOUTUBE_SEARCH) {
+                    int x = contentX();
+                    int y = contentY();
+                    int w = contentW();
+                    int h = contentH();
+                    int listY = y + 152;
+                    int listH = Math.max(SOURCE_ROW_HEIGHT + 36, h - 152);
+                    int rowStartY = listY + 24;
+                    if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 24) {
+                        int row = (int) ((mouseY - rowStartY) / SOURCE_ROW_HEIGHT);
+                        int maxRows = sourceVisibleRows(listH);
+                        int index = sourceResultScroll + row;
+                        if (row >= 0 && row < maxRows && index >= 0 && index < sourceSearchResults.size()) {
+                            selectedSourceResultIndex = index;
+                            applySearchResultToInputs(sourceSearchResults.get(index));
+                            return true;
+                        }
+                    }
+                }
+            } else {
+                int x = contentX();
+                int w = contentW();
+                int controlsY = panelY + PANEL_HEIGHT - 34;
+                int listY = contentY() + 24;
+                int listH = Math.max(MEDIA_ROW_HEIGHT + 40, (controlsY - 8) - listY);
+                int rowStartY = listY + 24;
+                if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
+                    int row = (int) ((mouseY - rowStartY) / MEDIA_ROW_HEIGHT);
+                    int maxRows = libraryVisibleRows(listH);
+                    int index = libraryScroll + row;
+                    int size = ClientMediaRepository.getInstance().getSortedLibrary().size();
+                    if (row >= 0 && row < maxRows && index >= 0 && index < size) {
+                        selectedLibraryIndex = index;
+                        return true;
+                    }
                 }
             }
         }
@@ -665,15 +805,32 @@ public class RadioScreen extends Screen {
         }
 
         if (tab == Tab.LIBRARY) {
-            int x = contentX();
-            int y = contentY() + 126;
-            int w = contentW();
-            int h = contentH() - 156;
-            int rowStartY = y + 24;
-            if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + h - 30) {
-                int size = ClientMediaRepository.getInstance().getSortedLibrary().size();
-                libraryScroll = clampScroll(libraryScroll + step, size, libraryVisibleRows(h));
-                return true;
+            if (libraryView == LibraryView.SOURCES) {
+                if (sourceMode == SourceMode.YOUTUBE_SEARCH) {
+                    int x = contentX();
+                    int y = contentY();
+                    int w = contentW();
+                    int h = contentH();
+                    int listY = y + 152;
+                    int listH = Math.max(SOURCE_ROW_HEIGHT + 36, h - 152);
+                    int rowStartY = listY + 24;
+                    if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 24) {
+                        sourceResultScroll = clampScroll(sourceResultScroll + step, sourceSearchResults.size(), sourceVisibleRows(listH));
+                        return true;
+                    }
+                }
+            } else {
+                int x = contentX();
+                int w = contentW();
+                int controlsY = panelY + PANEL_HEIGHT - 34;
+                int listY = contentY() + 24;
+                int listH = Math.max(MEDIA_ROW_HEIGHT + 40, (controlsY - 8) - listY);
+                int rowStartY = listY + 24;
+                if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
+                    int size = ClientMediaRepository.getInstance().getSortedLibrary().size();
+                    libraryScroll = clampScroll(libraryScroll + step, size, libraryVisibleRows(listH));
+                    return true;
+                }
             }
         }
 
@@ -703,7 +860,7 @@ public class RadioScreen extends Screen {
     }
 
     private void playFromInputs() {
-        String url = urlInput == null ? "" : urlInput.getValue().trim();
+        String url = normalizeSourceIdentifier(urlInput == null ? "" : urlInput.getValue().trim());
         if (url.isBlank()) {
             return;
         }
@@ -718,7 +875,7 @@ public class RadioScreen extends Screen {
     }
 
     private void queueInputFromInputs() {
-        String url = urlInput == null ? "" : urlInput.getValue().trim();
+        String url = normalizeSourceIdentifier(urlInput == null ? "" : urlInput.getValue().trim());
         if (url.isBlank()) {
             return;
         }
@@ -731,6 +888,202 @@ public class RadioScreen extends Screen {
         ClientMediaRepository.getInstance().enqueue(entry.id);
         selectedQueueIndex = Math.max(0, ClientMediaRepository.getInstance().getQueueEntries().size() - 1);
         resolveMetadataAndApply(url, title, artist, thumbnail, false);
+    }
+
+    private void resolveSourceMetadata() {
+        String url = normalizeSourceIdentifier(urlInput == null ? "" : urlInput.getValue().trim());
+        if (url.isBlank()) {
+            return;
+        }
+
+        String title = titleInput == null ? "" : titleInput.getValue().trim();
+        String artist = artistInput == null ? "" : artistInput.getValue().trim();
+        String thumbnail = thumbnailInput == null ? "" : thumbnailInput.getValue().trim();
+        resolveMetadataAndApply(url, title, artist, thumbnail, false);
+    }
+
+    private void openSourcesPage() {
+        libraryView = LibraryView.SOURCES;
+        sourceStatusMessage = sourceMode == SourceMode.YOUTUBE_SEARCH
+                ? "Enter a query and click Search."
+                : sourceMode.helperText;
+        rebuildRadioWidgets();
+    }
+
+    private void closeSourcesPage() {
+        libraryView = LibraryView.BROWSE;
+        rebuildRadioWidgets();
+    }
+
+    private void setSourceMode(SourceMode newMode) {
+        if (sourceMode == newMode) {
+            return;
+        }
+        sourceMode = newMode;
+        draftTitle = "";
+        draftArtist = "";
+        draftThumbnail = "";
+        if (titleInput != null) {
+            titleInput.setValue("");
+        }
+        if (artistInput != null) {
+            artistInput.setValue("");
+        }
+        if (thumbnailInput != null) {
+            thumbnailInput.setValue("");
+        }
+        selectedSourceResultIndex = -1;
+        sourceResultScroll = 0;
+        sourceStatusMessage = sourceMode == SourceMode.YOUTUBE_SEARCH
+                ? "Enter a query and click Search."
+                : sourceMode.helperText;
+        rebuildRadioWidgets();
+    }
+
+    private void searchYoutubeFromInput() {
+        String query = urlInput == null ? "" : urlInput.getValue().trim();
+        if (query.isBlank()) {
+            sourceStatusMessage = "Enter a YouTube search query first.";
+            return;
+        }
+
+        sourceSearchLoading = true;
+        sourceStatusMessage = "Searching YouTube for: " + trim(query, 36);
+        sourceSearchResults.clear();
+        selectedSourceResultIndex = -1;
+        sourceResultScroll = 0;
+
+        LavaPlayerAccess.get().searchYoutube(query, 40).whenComplete((results, error) -> {
+            if (minecraft == null) {
+                return;
+            }
+            minecraft.execute(() -> {
+                sourceSearchLoading = false;
+                sourceSearchResults.clear();
+                selectedSourceResultIndex = -1;
+                sourceResultScroll = 0;
+
+                if (error != null) {
+                    sourceStatusMessage = "Search failed. Try another query/source.";
+                    return;
+                }
+
+                if (results != null) {
+                    sourceSearchResults.addAll(results);
+                }
+                if (sourceSearchResults.isEmpty()) {
+                    sourceStatusMessage = "No results found.";
+                    return;
+                }
+
+                selectedSourceResultIndex = 0;
+                sourceStatusMessage = "Found " + sourceSearchResults.size() + " results.";
+
+                applySearchResultToInputs(sourceSearchResults.get(0));
+            });
+        });
+    }
+
+    private void applySearchResultToInputs(LavaPlayerAccess.SearchResult selected) {
+        if (selected == null) {
+            return;
+        }
+        if (titleInput != null) {
+            titleInput.setValue(selected.title() == null ? "" : selected.title());
+        }
+        if (artistInput != null) {
+            artistInput.setValue(selected.artist() == null ? "" : selected.artist());
+        }
+        if (thumbnailInput != null) {
+            thumbnailInput.setValue(MediaMetadataResolver.bestThumbnail(selected.thumbnail(), selected.identifier()));
+        }
+    }
+
+    private void playSelectedSearchResult() {
+        applySelectedSearchResult(SourceAction.PLAY);
+    }
+
+    private void queueSelectedSearchResult() {
+        applySelectedSearchResult(SourceAction.QUEUE);
+    }
+
+    private void saveSelectedSearchResult() {
+        applySelectedSearchResult(SourceAction.SAVE);
+    }
+
+    private void applySelectedSearchResult(SourceAction action) {
+        LavaPlayerAccess.SearchResult selected = getSelectedSearchResult();
+        if (selected == null) {
+            sourceStatusMessage = "Select a result first.";
+            return;
+        }
+
+        String titleOverride = titleInput == null ? "" : titleInput.getValue().trim();
+        String artistOverride = artistInput == null ? "" : artistInput.getValue().trim();
+        String thumbnailOverride = thumbnailInput == null ? "" : thumbnailInput.getValue().trim();
+
+        String finalTitle = titleOverride.isBlank() ? selected.title() : titleOverride;
+        String finalArtist = artistOverride.isBlank() ? selected.artist() : artistOverride;
+        String finalThumbnail = thumbnailOverride.isBlank()
+                ? MediaMetadataResolver.bestThumbnail(selected.thumbnail(), selected.identifier())
+                : thumbnailOverride;
+
+        SharedMediaSnapshot.MediaEntry entry = ClientMediaRepository.getInstance().upsertMedia(
+                selected.identifier(),
+                finalTitle,
+                finalArtist,
+                finalThumbnail,
+                List.of()
+        );
+
+        switch (action) {
+            case PLAY -> {
+                playEntry(entry, true);
+                sourceStatusMessage = "Playing: " + trim(finalTitle, 34);
+            }
+            case QUEUE -> {
+                ClientMediaRepository.getInstance().enqueue(entry.id);
+                selectedQueueIndex = Math.max(0, ClientMediaRepository.getInstance().getQueueEntries().size() - 1);
+                sourceStatusMessage = "Queued: " + trim(finalTitle, 34);
+            }
+            case SAVE -> sourceStatusMessage = "Saved: " + trim(finalTitle, 34);
+        }
+        selectLibraryEntry(entry.id);
+    }
+
+    private LavaPlayerAccess.SearchResult getSelectedSearchResult() {
+        if (sourceSearchResults.isEmpty()) {
+            return null;
+        }
+        if (selectedSourceResultIndex < 0 || selectedSourceResultIndex >= sourceSearchResults.size()) {
+            selectedSourceResultIndex = 0;
+        }
+        return sourceSearchResults.get(selectedSourceResultIndex);
+    }
+
+    private void selectLibraryEntry(String mediaId) {
+        if (mediaId == null || mediaId.isBlank()) {
+            return;
+        }
+        List<SharedMediaSnapshot.MediaEntry> entries = ClientMediaRepository.getInstance().getSortedLibrary();
+        for (int i = 0; i < entries.size(); i++) {
+            SharedMediaSnapshot.MediaEntry entry = entries.get(i);
+            if (mediaId.equals(entry.id)) {
+                selectedLibraryIndex = i;
+                return;
+            }
+        }
+    }
+
+    private String normalizeSourceIdentifier(String value) {
+        String source = value == null ? "" : value.trim();
+        if (source.isBlank()) {
+            return "";
+        }
+        if (sourceMode == SourceMode.YOUTUBE_URL && source.matches("^[A-Za-z0-9_-]{11}$")) {
+            return "https://www.youtube.com/watch?v=" + source;
+        }
+        return source;
     }
 
     private void playMedia(String url, String title, String artist, String thumbnail) {
@@ -793,7 +1146,7 @@ public class RadioScreen extends Screen {
     }
 
     private void addInputToLibrary() {
-        String url = urlInput == null ? "" : urlInput.getValue().trim();
+        String url = normalizeSourceIdentifier(urlInput == null ? "" : urlInput.getValue().trim());
         if (url.isBlank()) {
             return;
         }
@@ -1189,7 +1542,19 @@ public class RadioScreen extends Screen {
         if (selectedLibraryIndex >= library.size()) {
             selectedLibraryIndex = library.isEmpty() ? -1 : library.size() - 1;
         }
-        libraryScroll = clampScroll(libraryScroll, library.size(), libraryVisibleRows(contentH() - 156));
+        if (libraryView == LibraryView.BROWSE) {
+            int controlsY = panelY + PANEL_HEIGHT - 34;
+            int listY = contentY() + 24;
+            int listH = Math.max(MEDIA_ROW_HEIGHT + 40, (controlsY - 8) - listY);
+            libraryScroll = clampScroll(libraryScroll, library.size(), libraryVisibleRows(listH));
+        }
+        if (sourceMode == SourceMode.YOUTUBE_SEARCH) {
+            if (selectedSourceResultIndex >= sourceSearchResults.size()) {
+                selectedSourceResultIndex = sourceSearchResults.isEmpty() ? -1 : sourceSearchResults.size() - 1;
+            }
+            int sourceListH = Math.max(SOURCE_ROW_HEIGHT + 36, contentH() - 152);
+            sourceResultScroll = clampScroll(sourceResultScroll, sourceSearchResults.size(), sourceVisibleRows(sourceListH));
+        }
 
         List<SharedMediaSnapshot.PlaylistEntry> playlists = repository.getSortedPlaylists();
         if (!selectedPlaylistId.isBlank()) {
@@ -1462,6 +1827,10 @@ public class RadioScreen extends Screen {
 
     private int libraryVisibleRows(int listH) {
         return Math.max(1, (listH - 30) / MEDIA_ROW_HEIGHT);
+    }
+
+    private int sourceVisibleRows(int listH) {
+        return Math.max(1, (listH - 32) / SOURCE_ROW_HEIGHT);
     }
 
     private int playlistVisibleRows(int listH) {
@@ -1739,6 +2108,50 @@ public class RadioScreen extends Screen {
         NOW,
         LIBRARY,
         PLAYLISTS
+    }
+
+    private enum LibraryView {
+        BROWSE,
+        SOURCES
+    }
+
+    private enum SourceAction {
+        PLAY,
+        QUEUE,
+        SAVE
+    }
+
+    private enum SourceMode {
+        YOUTUBE_SEARCH(
+                "YouTube Search",
+                "Search YouTube and add results directly to your library/queue.",
+                "Search YouTube",
+                "Type a song, artist, or playlist query"
+        ),
+        YOUTUBE_URL(
+                "YouTube URL",
+                "Paste a YouTube URL (or video id) to add playback sources fast.",
+                "YouTube URL or video id",
+                "https://www.youtube.com/watch?v=..."
+        ),
+        DIRECT_URL_OR_FILE(
+                "Direct URL/File",
+                "Use direct media URLs, stream endpoints, or local file paths.",
+                "Direct URL or local file path",
+                "https://... or /path/to/file.mp3"
+        );
+
+        private final String displayName;
+        private final String helperText;
+        private final String inputLabel;
+        private final String inputHint;
+
+        SourceMode(String displayName, String helperText, String inputLabel, String inputHint) {
+            this.displayName = displayName;
+            this.helperText = helperText;
+            this.inputLabel = inputLabel;
+            this.inputHint = inputHint;
+        }
     }
 
     private record PlaybackView(

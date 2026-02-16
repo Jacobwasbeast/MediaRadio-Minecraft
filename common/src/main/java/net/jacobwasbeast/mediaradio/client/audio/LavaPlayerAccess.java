@@ -20,14 +20,20 @@ import net.jacobwasbeast.mediaradio.MediaRadio;
 
 import javax.sound.sampled.AudioInputStream;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class LavaPlayerAccess {
 
     public static final int SAMPLE_RATE = 48000;
     public static final int BYTES_PER_SECOND = SAMPLE_RATE * 2 * 2;
+    private static final Pattern YOUTUBE_WATCH_PATTERN = Pattern.compile("(?:youtu\\.be/|youtube\\.com/(?:watch\\?v=|shorts/|live/))([A-Za-z0-9_-]{11})");
+    private static final Pattern YOUTUBE_V_PARAM_PATTERN = Pattern.compile("[?&]v=([A-Za-z0-9_-]{11})");
 
     private static final LavaPlayerAccess INSTANCE = new LavaPlayerAccess();
 
@@ -73,6 +79,48 @@ public class LavaPlayerAccess {
             @Override
             public void noMatches() {
                 future.complete(null);
+            }
+
+            @Override
+            public void loadFailed(FriendlyException exception) {
+                future.completeExceptionally(exception);
+            }
+        });
+        return future.orTimeout(20, TimeUnit.SECONDS);
+    }
+
+    public CompletableFuture<List<SearchResult>> searchYoutube(String query, int maxResults) {
+        String safeQuery = query == null ? "" : query.trim();
+        if (safeQuery.isBlank()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+
+        int limit = Math.max(1, maxResults);
+        CompletableFuture<List<SearchResult>> future = new CompletableFuture<>();
+        audioPlayerManager.loadItemOrdered(this, "ytsearch:" + safeQuery, new AudioLoadResultHandler() {
+            @Override
+            public void trackLoaded(AudioTrack track) {
+                future.complete(List.of(toSearchResult(track)));
+            }
+
+            @Override
+            public void playlistLoaded(AudioPlaylist playlist) {
+                List<SearchResult> results = new ArrayList<>();
+                for (AudioTrack track : playlist.getTracks()) {
+                    if (track == null) {
+                        continue;
+                    }
+                    results.add(toSearchResult(track));
+                    if (results.size() >= limit) {
+                        break;
+                    }
+                }
+                future.complete(results);
+            }
+
+            @Override
+            public void noMatches() {
+                future.complete(List.of());
             }
 
             @Override
@@ -145,6 +193,40 @@ public class LavaPlayerAccess {
         return identifier.trim();
     }
 
+    private SearchResult toSearchResult(AudioTrack track) {
+        AudioTrackInfo info = track.getInfo();
+        String identifier = normalizeIdentifier(info.uri == null || info.uri.isBlank() ? info.identifier : info.uri);
+        String title = info.title == null || info.title.isBlank() ? identifier : info.title;
+        String artist = info.author == null ? "" : info.author;
+        String thumbnail = inferYoutubeThumbnail(identifier.isBlank() ? info.identifier : identifier);
+        long duration = info.length > 0L ? info.length : track.getDuration();
+        return new SearchResult(identifier, title, artist, thumbnail, duration, info.isStream);
+    }
+
+    private String inferYoutubeThumbnail(String source) {
+        if (source == null || source.isBlank()) {
+            return "";
+        }
+
+        Matcher matcher = YOUTUBE_WATCH_PATTERN.matcher(source);
+        if (matcher.find()) {
+            return "https://i.ytimg.com/vi/" + matcher.group(1) + "/hqdefault.jpg";
+        }
+
+        Matcher vMatcher = YOUTUBE_V_PARAM_PATTERN.matcher(source);
+        if (vMatcher.find()) {
+            return "https://i.ytimg.com/vi/" + vMatcher.group(1) + "/hqdefault.jpg";
+        }
+
+        if (source.matches("^[A-Za-z0-9_-]{11}$")) {
+            return "https://i.ytimg.com/vi/" + source + "/hqdefault.jpg";
+        }
+        return "";
+    }
+
     public record OpenedTrack(AudioPlayer player, AudioInputStream stream, AudioTrack track, AudioTrackInfo info, long durationMs) {
+    }
+
+    public record SearchResult(String identifier, String title, String artist, String thumbnail, long durationMs, boolean stream) {
     }
 }
