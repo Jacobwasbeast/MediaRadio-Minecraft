@@ -15,11 +15,15 @@ import static net.jacobwasbeast.mediaradio.MediaRadio.id;
 public class ModItems {
 
     public static Item RADIO_ITEM;
+    public static Item ANTENA_ITEM;
+    public static Item DISPLAY_ITEM;
     public static DeferredObject<CreativeModeTab> CREATIVE_MODE_TAB;
 
     public static void initialize(BalmItems items) {
+        items.registerItem((identifier) -> ANTENA_ITEM = new Item(itemProperties(identifier)), id("antena"));
+        items.registerItem((identifier) -> DISPLAY_ITEM = new Item(itemProperties(identifier)), id("display"));
         items.registerItem((identifier) -> RADIO_ITEM = new RadioItem(itemProperties(identifier).stacksTo(1)), id("radio"));
         CREATIVE_MODE_TAB = items.registerCreativeModeTab(() -> new ItemStack(RADIO_ITEM), id(MediaRadio.MOD_ID));
-        items.addToCreativeModeTab(id(MediaRadio.MOD_ID), () -> new ItemLike[]{RADIO_ITEM});
+        items.addToCreativeModeTab(id(MediaRadio.MOD_ID), () -> new ItemLike[]{ANTENA_ITEM, DISPLAY_ITEM, RADIO_ITEM});
     }
 }

@@ -1,0 +1,29 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    " A ",
+    "DBI",
+    "SIS"
+  ],
+  "key": {
+    "A": {
+      "item": "mediaradio:antena"
+    },
+    "D": {
+      "item": "mediaradio:display"
+    },
+    "B": {
+      "item": "minecraft:iron_block"
+    },
+    "I": {
+      "item": "minecraft:iron_ingot"
+    },
+    "S": {
+      "item": "minecraft:stone_button"
+    }
+  },
+  "result": {
+    "item": "mediaradio:radio",
+    "count": 1
+  }
+}

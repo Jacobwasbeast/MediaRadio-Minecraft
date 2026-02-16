@@ -1,4 +1,6 @@
 {
+  "item.mediaradio.antena": "Antena",
+  "item.mediaradio.display": "Display",
   "item.mediaradio.radio": "Media Radio",
   "block.mediaradio.radio_block": "Media Radio",
   "itemGroup.mediaradio": "Media Radio",
