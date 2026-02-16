@@ -945,13 +945,51 @@ public class RadioScreen extends Screen {
         if (selectedQueueIndex < 0) {
             return;
         }
-        ClientMediaRepository.getInstance().removeQueueIndex(selectedQueueIndex);
-        int queueSize = ClientMediaRepository.getInstance().getQueueEntries().size();
+
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        List<SharedMediaSnapshot.MediaEntry> queueEntries = repository.getQueueEntries();
+        if (selectedQueueIndex >= queueEntries.size()) {
+            return;
+        }
+
+        SharedMediaSnapshot.MediaEntry removedEntry = queueEntries.get(selectedQueueIndex);
+        int currentQueueIndex = repository.getQueueIndex();
+        boolean removedCurrentQueueItem = selectedQueueIndex == currentQueueIndex;
+        boolean removedCurrentlyPlayingUrl = isRemovedEntryCurrentlyPlaying(removedEntry);
+
+        repository.removeQueueIndex(selectedQueueIndex);
+        int queueSize = repository.getQueueEntries().size();
         if (queueSize == 0) {
             selectedQueueIndex = -1;
         } else {
             selectedQueueIndex = Math.min(selectedQueueIndex, queueSize - 1);
         }
+
+        if (removedCurrentQueueItem || removedCurrentlyPlayingUrl) {
+            stopPlayback();
+        } else {
+            persistRuntimeState();
+        }
+    }
+
+    private boolean isRemovedEntryCurrentlyPlaying(SharedMediaSnapshot.MediaEntry removedEntry) {
+        if (removedEntry == null || removedEntry.url == null || removedEntry.url.isBlank()) {
+            return false;
+        }
+
+        if (isBlockMode()) {
+            RadioBlockEntity blockEntity = getBlockEntity();
+            return blockEntity != null
+                    && removedEntry.url.equals(blockEntity.getMediaUrl())
+                    && (blockEntity.isPlaying() || blockEntity.getPlaybackPositionMs() > 0L);
+        }
+
+        ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+        String handheldUrl = audioEngine.getHandheldUrl();
+        return handheldUrl != null
+                && !handheldUrl.isBlank()
+                && removedEntry.url.equals(handheldUrl)
+                && (audioEngine.isHandheldPlaying() || audioEngine.isHandheldPaused());
     }
 
     private void moveSelectedQueue(int direction) {
