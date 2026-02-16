@@ -364,6 +364,7 @@ public class ClientAudioEngine {
     }
 
     private void tickHandheld(Minecraft minecraft) {
+        pruneOrphanedHandheldSessions(minecraft);
         syncActiveContextFromHeldHands(minecraft);
 
         HandheldSession session = activeSession();
@@ -453,6 +454,43 @@ public class ClientAudioEngine {
             session.intendedPlaying = false;
         }
         persistRuntimeToSession(minecraft, session);
+    }
+
+    private void pruneOrphanedHandheldSessions(Minecraft minecraft) {
+        if (minecraft.player == null || handheldSessions.isEmpty()) {
+            return;
+        }
+
+        Set<String> orphanedRadioIds = new HashSet<>();
+        for (Map.Entry<String, HandheldSession> entry : handheldSessions.entrySet()) {
+            String radioId = entry.getKey();
+            if (radioId == null || radioId.isBlank()) {
+                orphanedRadioIds.add(radioId == null ? "" : radioId);
+                continue;
+            }
+            if (findRadioStackById(minecraft, radioId).isEmpty()) {
+                orphanedRadioIds.add(radioId);
+            }
+        }
+
+        for (String radioId : orphanedRadioIds) {
+            HandheldSession orphaned = handheldSessions.remove(radioId);
+            if (orphaned == null) {
+                continue;
+            }
+            stopSessionPlayback(orphaned);
+            orphaned.title = "";
+            orphaned.artist = "";
+            orphaned.thumbnail = "";
+            orphaned.url = "";
+            orphaned.pausedState = false;
+            orphaned.pausedPositionMs = 0L;
+            orphaned.intendedPlaying = false;
+            orphaned.lastSyncedRuntimeKey = "";
+            if (radioId.equals(activeHandheldRadioId)) {
+                activeHandheldRadioId = "";
+            }
+        }
     }
 
     private void playSession(HandheldSession session, String url, long positionMs, String displayTitle, String artist, String thumbnail) {
