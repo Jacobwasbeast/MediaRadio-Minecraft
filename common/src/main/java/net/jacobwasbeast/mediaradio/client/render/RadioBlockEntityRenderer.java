@@ -17,8 +17,11 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.state.BlockState;
 import net.jacobwasbeast.mediaradio.block.RadioBlock;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
+import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
+import net.jacobwasbeast.mediaradio.client.media.PlaybackDisplayResolver;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
+import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
 import net.minecraft.core.Direction;
 
 import java.util.ArrayList;
@@ -48,13 +51,27 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         Minecraft minecraft = Minecraft.getInstance();
         Font font = minecraft.font;
 
-        String title = safe(blockEntity.getMediaTitle(), "No Media");
-        String artist = safe(blockEntity.getMediaArtist(), "Unknown Artist");
+        SharedMediaSnapshot.MediaEntry queueEntry = null;
+        String radioId = blockEntity.getRadioId();
+        if (radioId != null && !radioId.isBlank()) {
+            queueEntry = ClientMediaRepository.getInstance().getCurrentQueueEntryForRadioId(radioId);
+        }
+
+        PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
+                blockEntity.getMediaUrl(),
+                blockEntity.getMediaTitle(),
+                blockEntity.getMediaArtist(),
+                blockEntity.getMediaThumbnail(),
+                queueEntry
+        );
+
+        String title = safe(displayInfo.title(), "No Media");
+        String artist = safe(displayInfo.artist(), "Unknown Artist");
         String status = blockEntity.isPlaying() ? "PLAY" : "PAUSE";
         String time = formatTime(blockEntity.getPlaybackPositionMs());
         String volume = (int) (Math.max(0f, Math.min(2f, blockEntity.getVolume())) * 100f) + "%";
         String clockAndVolume = time + " " + volume;
-        String thumbnailUrl = MediaMetadataResolver.bestThumbnail(blockEntity.getMediaThumbnail(), blockEntity.getMediaUrl());
+        String thumbnailUrl = MediaMetadataResolver.bestThumbnail(displayInfo.thumbnail(), blockEntity.getMediaUrl());
         var thumbnailTexture = ThumbnailTextureManager.getInstance().getTexture(thumbnailUrl);
 
         int panelWidth = PANEL_WIDTH;

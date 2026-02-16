@@ -4,6 +4,7 @@ import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
+import net.jacobwasbeast.mediaradio.client.media.PlaybackDisplayResolver;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
@@ -1244,11 +1245,12 @@ public class RadioScreen extends Screen {
             if (title == null || title.isBlank()) {
                 title = blockEntity.getMediaUrl().isBlank() ? "Nothing queued" : blockEntity.getMediaUrl();
             }
-            PlaybackDisplayInfo displayInfo = resolveDisplayInfoFromQueue(
+            PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
                     blockEntity.getMediaUrl(),
                     title,
                     blockEntity.getMediaArtist(),
-                    blockEntity.getMediaThumbnail()
+                    blockEntity.getMediaThumbnail(),
+                    ClientMediaRepository.getInstance().getCurrentQueueEntry()
             );
             String state = blockEntity.getMediaUrl().isBlank() ? "Stopped" : (blockEntity.isPlaying() ? "Playing" : "Paused");
             long channelPositionMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockPlaybackPositionMs(blockPos);
@@ -1266,11 +1268,12 @@ public class RadioScreen extends Screen {
         }
 
         ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
-        PlaybackDisplayInfo displayInfo = resolveDisplayInfoFromQueue(
+        PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
                 audioEngine.getHandheldUrl(),
                 audioEngine.getHandheldNowPlaying(),
                 audioEngine.getHandheldArtist(),
-                audioEngine.getHandheldThumbnail()
+                audioEngine.getHandheldThumbnail(),
+                ClientMediaRepository.getInstance().getCurrentQueueEntry()
         );
         String title = displayInfo.title();
         if (title == null || title.isBlank()) {
@@ -1295,72 +1298,6 @@ public class RadioScreen extends Screen {
                 audioEngine.getHandheldTrackDurationMs(),
                 audioEngine.getHandheldVolume()
         );
-    }
-
-    private PlaybackDisplayInfo resolveDisplayInfoFromQueue(String playbackUrl, String title, String artist, String thumbnail) {
-        String resolvedUrl = playbackUrl == null ? "" : playbackUrl.trim();
-        String resolvedTitle = title == null ? "" : title.trim();
-        String resolvedArtist = artist == null ? "" : artist.trim();
-        String resolvedThumbnail = thumbnail == null ? "" : thumbnail.trim();
-
-        SharedMediaSnapshot.MediaEntry currentQueue = ClientMediaRepository.getInstance().getCurrentQueueEntry();
-        if (currentQueue == null) {
-            return new PlaybackDisplayInfo(resolvedTitle, resolvedArtist, resolvedThumbnail);
-        }
-
-        String queueUrl = currentQueue.url == null ? "" : currentQueue.url.trim();
-        String queueTitle = currentQueue.title == null || currentQueue.title.isBlank() ? queueUrl : currentQueue.title.trim();
-        String queueArtist = currentQueue.artist == null ? "" : currentQueue.artist.trim();
-        String queueThumbnail = MediaMetadataResolver.bestThumbnail(currentQueue.thumbnail, queueUrl);
-
-        boolean titleLooksLikeUrl = resolvedTitle.startsWith("http://") || resolvedTitle.startsWith("https://");
-        boolean artistMissing = resolvedArtist.isBlank() || "Unknown Artist".equalsIgnoreCase(resolvedArtist);
-        boolean likelySameTrack = urlsMatch(resolvedUrl, queueUrl);
-
-        if (!likelySameTrack && !titleLooksLikeUrl && !artistMissing) {
-            return new PlaybackDisplayInfo(resolvedTitle, resolvedArtist, resolvedThumbnail);
-        }
-
-        if (!queueTitle.isBlank() && (resolvedTitle.isBlank() || titleLooksLikeUrl || likelySameTrack)) {
-            resolvedTitle = queueTitle;
-        }
-        if (!queueArtist.isBlank() && (artistMissing || likelySameTrack)) {
-            resolvedArtist = queueArtist;
-        }
-        if (!queueThumbnail.isBlank() && (resolvedThumbnail.isBlank() || likelySameTrack)) {
-            resolvedThumbnail = queueThumbnail;
-        }
-
-        return new PlaybackDisplayInfo(resolvedTitle, resolvedArtist, resolvedThumbnail);
-    }
-
-    private boolean urlsMatch(String first, String second) {
-        String a = normalizeUrlForCompare(first);
-        String b = normalizeUrlForCompare(second);
-        if (a.isBlank() || b.isBlank()) {
-            return false;
-        }
-        if (a.equalsIgnoreCase(b)) {
-            return true;
-        }
-        String aThumb = MediaMetadataResolver.bestThumbnail("", a);
-        String bThumb = MediaMetadataResolver.bestThumbnail("", b);
-        return !aThumb.isBlank() && aThumb.equalsIgnoreCase(bThumb);
-    }
-
-    private String normalizeUrlForCompare(String value) {
-        if (value == null) {
-            return "";
-        }
-        String normalized = value.trim();
-        int fragmentIndex = normalized.indexOf('#');
-        if (fragmentIndex >= 0) {
-            normalized = normalized.substring(0, fragmentIndex);
-        }
-        while (normalized.endsWith("/")) {
-            normalized = normalized.substring(0, normalized.length() - 1);
-        }
-        return normalized;
     }
 
     private String formatTime(long ms) {
@@ -1812,13 +1749,6 @@ public class RadioScreen extends Screen {
             long positionMs,
             long durationMs,
             float volume
-    ) {
-    }
-
-    private record PlaybackDisplayInfo(
-            String title,
-            String artist,
-            String thumbnail
     ) {
     }
 }

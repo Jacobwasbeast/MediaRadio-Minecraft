@@ -1,6 +1,8 @@
 package net.jacobwasbeast.mediaradio.client.render;
 
 import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
+import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
+import net.jacobwasbeast.mediaradio.client.media.PlaybackDisplayResolver;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
@@ -32,13 +34,38 @@ public final class RadioHeldOverlayRenderer {
         }
 
         ClientAudioEngine audio = ClientAudioEngine.getInstance();
-        String title = audio.getHandheldNowPlaying();
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String mainRadioId = mainHandShowsOverlay ? RadioItem.getRadioId(main) : "";
+        String offRadioId = offHandShowsOverlay ? RadioItem.getRadioId(off) : "";
+        String activeRadioId = repository.getActiveRadioId();
+        String radioIdForQueue = "";
+        if (!activeRadioId.isBlank()) {
+            if (activeRadioId.equals(mainRadioId)) {
+                radioIdForQueue = mainRadioId;
+            } else if (activeRadioId.equals(offRadioId)) {
+                radioIdForQueue = offRadioId;
+            }
+        }
+        if (radioIdForQueue.isBlank()) {
+            radioIdForQueue = !mainRadioId.isBlank() ? mainRadioId : offRadioId;
+        }
+
+        var queueEntry = radioIdForQueue.isBlank() ? null : repository.getCurrentQueueEntryForRadioId(radioIdForQueue);
+        PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
+                audio.getHandheldUrl(),
+                audio.getHandheldNowPlaying(),
+                audio.getHandheldArtist(),
+                audio.getHandheldThumbnail(),
+                queueEntry
+        );
+
+        String title = displayInfo.title();
         if (title == null || title.isBlank()) {
             title = "Nothing Playing";
         }
 
         String state = audio.isHandheldPlaying() ? "Playing" : (audio.isHandheldPaused() ? "Paused" : "Stopped");
-        String artist = audio.getHandheldArtist();
+        String artist = displayInfo.artist();
         if (artist == null || artist.isBlank()) {
             artist = "Unknown Artist";
         }
@@ -54,7 +81,7 @@ public final class RadioHeldOverlayRenderer {
         guiGraphics.fill(x, y, x + 1, y + PANEL_H, 0xFF4F7390);
         guiGraphics.fill(x + PANEL_W - 1, y, x + PANEL_W, y + PANEL_H, 0xFF4F7390);
 
-        drawThumb(guiGraphics, audio.getHandheldThumbnail(), x + 6, y + 10, THUMB);
+        drawThumb(guiGraphics, displayInfo.thumbnail(), x + 6, y + 10, THUMB);
 
         Font font = minecraft.font;
         int tx = x + 6 + THUMB + 6;
