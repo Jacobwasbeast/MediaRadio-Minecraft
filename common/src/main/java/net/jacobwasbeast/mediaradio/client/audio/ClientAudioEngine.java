@@ -244,6 +244,43 @@ public class ClientAudioEngine {
         return session == null ? "" : session.url;
     }
 
+    public HandheldRenderState getRenderStateForRadioId(String radioId) {
+        if (radioId == null || radioId.isBlank()) {
+            return null;
+        }
+
+        HandheldSession session = handheldSessions.get(radioId);
+        if (session == null) {
+            return null;
+        }
+
+        String title = session.title;
+        long position = Math.max(0L, session.pausedPositionMs);
+        long duration = -1L;
+        boolean playing = false;
+        boolean paused = session.pausedState;
+
+        if (session.channel != null) {
+            title = session.channel.getDisplayTitle();
+            position = session.channel.getEstimatedPositionMs();
+            duration = session.channel.getTrackDurationMs();
+            playing = session.channel.isPlaying();
+            paused = session.channel.isPaused();
+        }
+
+        return new HandheldRenderState(
+                safe(session.url),
+                safe(title),
+                safe(session.artist),
+                safe(session.thumbnail),
+                Math.max(0L, position),
+                duration,
+                Mth.clamp(session.volume, 0f, 2f),
+                playing,
+                paused
+        );
+    }
+
     public void setHandheldContext(String radioId, InteractionHand hand) {
         if (hand != null) {
             activeHandheldHand = hand;
@@ -969,5 +1006,18 @@ public class ClientAudioEngine {
         private HandheldSession(String radioId) {
             this.radioId = radioId;
         }
+    }
+
+    public record HandheldRenderState(
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            long positionMs,
+            long durationMs,
+            float volume,
+            boolean playing,
+            boolean paused
+    ) {
     }
 }
