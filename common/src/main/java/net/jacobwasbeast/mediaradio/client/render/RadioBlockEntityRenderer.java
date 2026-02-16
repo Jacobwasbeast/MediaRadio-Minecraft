@@ -115,7 +115,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         poseStack.scale(SCREEN_SCALE, -SCREEN_SCALE, SCREEN_SCALE);
 
         drawPanel(poseStack, bufferSource, panelLeft, panelTop, panelWidth, panelHeight);
-        drawThumbnail(poseStack, bufferSource, thumbnailTexture, thumbX, thumbY, thumbW, thumbH, packedLight);
+        drawThumbnail(poseStack, bufferSource, font, thumbnailTexture, thumbX, thumbY, thumbW, thumbH, packedLight);
         drawSingleLine(poseStack, bufferSource, font, status, topTextX, innerTop, 0xFF66C7, packedLight, topTextWrap);
         drawSingleLine(poseStack, bufferSource, font, clockAndVolume, topTextX, innerTop + LINE_HEIGHT, 0x82F1C3, packedLight, topTextWrap);
         drawLines(poseStack, bufferSource, font, infoLines, innerLeft, infoStartY, packedLight);
@@ -163,11 +163,16 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         consumer.vertex(matrix, x, y, z).color(r, g, b, a).endVertex();
     }
 
-    private void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
+    private void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, Font font, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
         if (texture == null || texture.location() == null) {
+            drawMissingThumbnailPlaceholder(poseStack, bufferSource, font, x, y, width, height, packedLight);
             return;
         }
         if (width <= 0 || height <= 0) {
+            return;
+        }
+        if (texture.location().equals(MissingTextureAtlasSprite.getLocation())) {
+            drawMissingThumbnailPlaceholder(poseStack, bufferSource, font, x, y, width, height, packedLight);
             return;
         }
 
@@ -200,6 +205,25 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         consumer.vertex(matrix, right, bottom, z).color(255, 255, 255, 255).uv(1f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
         consumer.vertex(matrix, right, top, z).color(255, 255, 255, 255).uv(1f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
         consumer.vertex(matrix, left, top, z).color(255, 255, 255, 255).uv(0f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+    }
+
+    private void drawMissingThumbnailPlaceholder(PoseStack poseStack, MultiBufferSource bufferSource, Font font, int x, int y, int width, int height, int packedLight) {
+        int centerX = x + (width / 2);
+        int centerY = y + (height / 2) - 4;
+        String marker = "?";
+        int markerX = centerX - (font.width(marker) / 2);
+        font.drawInBatch(
+                marker,
+                markerX,
+                centerY,
+                0xFF9FB4C4,
+                false,
+                poseStack.last().pose(),
+                bufferSource,
+                Font.DisplayMode.POLYGON_OFFSET,
+                0,
+                packedLight
+        );
     }
 
     private String safe(String value, String fallback) {
