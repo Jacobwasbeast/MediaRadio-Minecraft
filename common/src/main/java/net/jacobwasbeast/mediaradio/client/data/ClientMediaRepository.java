@@ -182,7 +182,11 @@ public class ClientMediaRepository {
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry getCurrentQueueEntry() {
-        QueueState queueState = activeQueueState();
+        return getCurrentQueueEntryForRadioId(activeRadioId);
+    }
+
+    public synchronized SharedMediaSnapshot.MediaEntry getCurrentQueueEntryForRadioId(String radioId) {
+        QueueState queueState = queueStateForRadioId(radioId);
         int currentIndex = findCurrentQueueIndex(queueState);
         if (currentIndex < 0) {
             return null;
@@ -342,7 +346,15 @@ public class ClientMediaRepository {
     }
 
     public synchronized String exportActiveQueueStateJson() {
-        QueueState queueState = activeQueueState();
+        return exportQueueStateJsonForRadioId(activeRadioId);
+    }
+
+    public synchronized String exportQueueStateJsonForRadioId(String radioId) {
+        QueueState queueState = queueStateForRadioId(radioId);
+        return exportQueueStateJson(queueState);
+    }
+
+    private String exportQueueStateJson(QueueState queueState) {
         QueueStatePayload payload = new QueueStatePayload();
         payload.loopMode = queueState.loopMode;
         payload.currentQueueItemId = queueState.currentQueueItemId;
@@ -561,7 +573,12 @@ public class ClientMediaRepository {
     }
 
     private synchronized QueueState activeQueueState() {
-        QueueState queueState = queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+        return queueStateForRadioId(activeRadioId);
+    }
+
+    private QueueState queueStateForRadioId(String radioId) {
+        String safeId = safeRadioId(radioId);
+        QueueState queueState = queuesByRadioId.computeIfAbsent(safeId, ignored -> new QueueState());
         sanitizeQueue(queueState);
         return queueState;
     }

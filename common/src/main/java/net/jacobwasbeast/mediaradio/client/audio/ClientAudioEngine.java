@@ -2,6 +2,7 @@ package net.jacobwasbeast.mediaradio.client.audio;
 
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
+import net.jacobwasbeast.mediaradio.client.screen.RadioScreen;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
@@ -370,7 +371,8 @@ public class ClientAudioEngine {
             return;
         }
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
-        if (!session.radioId.equals(repository.getActiveRadioId())) {
+        boolean blockScreenOpen = minecraft.screen instanceof RadioScreen radioScreen && radioScreen.isBlockModeScreen();
+        if (!blockScreenOpen && !session.radioId.equals(repository.getActiveRadioId())) {
             repository.setActiveRadioId(session.radioId);
         }
 
@@ -424,8 +426,20 @@ public class ClientAudioEngine {
             return;
         }
 
-        alignQueueIndexToCurrentUrl(repository, session.url);
-        SharedMediaSnapshot.MediaEntry next = repository.nextQueueEntry();
+        String previousActiveRadioId = repository.getActiveRadioId();
+        boolean switchedContext = !session.radioId.equals(previousActiveRadioId);
+        if (switchedContext) {
+            repository.setActiveRadioId(session.radioId);
+        }
+        SharedMediaSnapshot.MediaEntry next;
+        try {
+            alignQueueIndexToCurrentUrl(repository, session.url);
+            next = repository.nextQueueEntry();
+        } finally {
+            if (switchedContext) {
+                repository.setActiveRadioId(previousActiveRadioId);
+            }
+        }
         if (next != null && next.url != null && !next.url.isBlank()) {
             playSession(session, next.url, 0L, next.title, next.artist, next.thumbnail);
         } else {
@@ -532,9 +546,10 @@ public class ClientAudioEngine {
             return;
         }
 
-        String queueStateJson = ClientMediaRepository.getInstance().exportActiveQueueStateJson();
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String queueStateJson = repository.exportQueueStateJsonForRadioId(session.radioId);
         long position = session.channel == null ? Math.max(0L, session.pausedPositionMs) : session.channel.getEstimatedPositionMs();
-        SharedMediaSnapshot.MediaEntry current = ClientMediaRepository.getInstance().getCurrentQueueEntry();
+        SharedMediaSnapshot.MediaEntry current = repository.getCurrentQueueEntryForRadioId(session.radioId);
         String resolvedUrl = current != null && current.url != null && !current.url.isBlank() ? current.url : session.url;
         syncRuntimeStateToServer(session, stack, resolvedUrl, session.title, session.artist, session.thumbnail, queueStateJson, position, session.volume);
     }

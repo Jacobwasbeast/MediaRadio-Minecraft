@@ -96,6 +96,7 @@ public class RadioScreen extends Screen {
     private boolean timelineDragging;
     private String lastPersistedQueueState = "";
     private String lastPersistedRuntimeKey = "";
+    private String lastBoundBlockRadioId = "";
 
     private RadioScreen(BlockPos blockPos, InteractionHand hand) {
         super(Component.literal("Media Radio"));
@@ -125,8 +126,8 @@ public class RadioScreen extends Screen {
             RadioBlockEntity blockEntity = getBlockEntity();
             if (blockEntity != null) {
                 blockVolume = blockEntity.getVolume();
-                ClientMediaRepository.getInstance().importActiveQueueStateJson(blockEntity.getQueueStateJson());
             }
+            syncBlockRadioContext();
         }
 
         clampSelections();
@@ -140,26 +141,7 @@ public class RadioScreen extends Screen {
             if (blockEntity != null && blockEntity.getRadioId() != null && !blockEntity.getRadioId().isBlank()) {
                 return blockEntity.getRadioId();
             }
-            // Client can briefly see an unsynced block entity after placement.
-            // Reuse current active/held radio id to avoid queue switching during place/pick transitions.
-            if (minecraft.player != null) {
-                var main = minecraft.player.getMainHandItem();
-                if (main.is(ModItems.RADIO_ITEM)) {
-                    String mainId = RadioItem.getRadioId(main);
-                    if (mainId != null && !mainId.isBlank()) {
-                        return mainId;
-                    }
-                }
-                var off = minecraft.player.getOffhandItem();
-                if (off.is(ModItems.RADIO_ITEM)) {
-                    String offId = RadioItem.getRadioId(off);
-                    if (offId != null && !offId.isBlank()) {
-                        return offId;
-                    }
-                }
-            }
-            String active = ClientMediaRepository.getInstance().getActiveRadioId();
-            return active == null || active.isBlank() ? "default" : active;
+            return blockContextKey();
         }
 
         if (minecraft.player == null || hand == null) {
@@ -185,6 +167,7 @@ public class RadioScreen extends Screen {
             if (blockEntity != null) {
                 blockVolume = blockEntity.getVolume();
             }
+            syncBlockRadioContext();
         }
 
         if (urlInput != null) {
@@ -1502,6 +1485,10 @@ public class RadioScreen extends Screen {
         return blockPos != null;
     }
 
+    public boolean isBlockModeScreen() {
+        return isBlockMode();
+    }
+
     private float getVolume() {
         return isBlockMode() ? blockVolume : ClientAudioEngine.getInstance().getHandheldVolume();
     }
@@ -1519,11 +1506,22 @@ public class RadioScreen extends Screen {
 
     private void persistRuntimeState() {
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
-        String queueStateJson = repository.exportActiveQueueStateJson();
         if (isBlockMode()) {
             if (blockPos == null) {
                 return;
             }
+            RadioBlockEntity blockEntity = getBlockEntity();
+            if (blockEntity == null) {
+                return;
+            }
+            String radioId = blockEntity.getRadioId();
+            if (radioId == null || radioId.isBlank()) {
+                return;
+            }
+            if (!radioId.equals(repository.getActiveRadioId())) {
+                repository.setActiveRadioId(radioId);
+            }
+            String queueStateJson = repository.exportActiveQueueStateJson();
             if (!queueStateJson.equals(lastPersistedQueueState)) {
                 ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
                         blockPos,
@@ -1540,6 +1538,7 @@ public class RadioScreen extends Screen {
             return;
         }
 
+        String queueStateJson = repository.exportActiveQueueStateJson();
         if (minecraft == null || minecraft.player == null || hand == null) {
             return;
         }
@@ -1578,6 +1577,43 @@ public class RadioScreen extends Screen {
                 ClientAudioEngine.getInstance().isHandheldPlaying()
         ));
         lastPersistedRuntimeKey = key;
+    }
+
+    private void syncBlockRadioContext() {
+        if (!isBlockMode()) {
+            return;
+        }
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        RadioBlockEntity blockEntity = getBlockEntity();
+        if (blockEntity == null) {
+            repository.setActiveRadioId(blockContextKey());
+            return;
+        }
+        String radioId = blockEntity.getRadioId();
+        if (radioId == null || radioId.isBlank()) {
+            repository.setActiveRadioId(blockContextKey());
+            return;
+        }
+        if (!radioId.equals(repository.getActiveRadioId())) {
+            repository.setActiveRadioId(radioId);
+        }
+        if (!radioId.equals(lastBoundBlockRadioId)) {
+            String queueState = blockEntity.getQueueStateJson();
+            repository.importActiveQueueStateJson(queueState);
+            lastPersistedQueueState = queueState;
+            lastBoundBlockRadioId = radioId;
+        }
+    }
+
+    private String blockContextKey() {
+        if (blockPos == null) {
+            return "block:unknown";
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level != null) {
+            return "block:" + minecraft.level.dimension().location() + ":" + blockPos.getX() + "," + blockPos.getY() + "," + blockPos.getZ();
+        }
+        return "block:" + blockPos.getX() + "," + blockPos.getY() + "," + blockPos.getZ();
     }
 
     private String trim(String value, int maxLength) {
