@@ -370,6 +370,19 @@ public class ClientAudioEngine {
             return;
         }
 
+        // While the radio is in block placement mode, keep playback paused locally.
+        // We still preserve intendedPlaying so placing the radio can resume playback.
+        if (isRadioHeldInPlaceMode(minecraft, session.radioId)) {
+            if (session.channel != null && session.channel.isPlaying()) {
+                session.pausedPositionMs = session.channel.getEstimatedPositionMs();
+                session.pausedState = true;
+                session.intendedPlaying = true;
+                session.channel.pause();
+            }
+            persistRuntimeToSession(minecraft, session);
+            return;
+        }
+
         if (!isRadioHeldInHands(minecraft, session.radioId)) {
             if (session.channel != null && session.channel.isPlaying()) {
                 session.pausedPositionMs = session.channel.getEstimatedPositionMs();
@@ -535,8 +548,9 @@ public class ClientAudioEngine {
         String radioId = RadioItem.getOrCreateRadioId(stack);
         long positionBucket = Math.max(0L, position) / 500L;
         float clampedVolume = Mth.clamp(volume, 0f, 2f);
+        boolean shouldPlay = session.intendedPlaying && !safe(url).isBlank();
         String stateKey = radioId + "|" + safe(url) + "|" + safe(title) + "|" + safe(artist) + "|" + safe(thumbnail) + "|"
-                + queueStateJson.hashCode() + "|" + positionBucket + "|" + clampedVolume;
+                + queueStateJson.hashCode() + "|" + positionBucket + "|" + clampedVolume + "|" + shouldPlay;
         if (stateKey.equals(session.lastSyncedRuntimeKey)) {
             return;
         }
@@ -550,7 +564,7 @@ public class ClientAudioEngine {
                 queueStateJson == null ? "" : queueStateJson,
                 clampedVolume,
                 Math.max(0L, position),
-                session.channel != null && session.channel.isPlaying()
+                shouldPlay
         ));
         session.lastSyncedRuntimeKey = stateKey;
     }
@@ -587,15 +601,27 @@ public class ClientAudioEngine {
     }
 
     private boolean isRadioHeldInHands(Minecraft minecraft, String radioId) {
+        return !getHeldRadioStackById(minecraft, radioId).isEmpty();
+    }
+
+    private boolean isRadioHeldInPlaceMode(Minecraft minecraft, String radioId) {
+        ItemStack heldStack = getHeldRadioStackById(minecraft, radioId);
+        return !heldStack.isEmpty() && RadioItem.isPlaceMode(heldStack);
+    }
+
+    private ItemStack getHeldRadioStackById(Minecraft minecraft, String radioId) {
         if (minecraft.player == null || radioId == null || radioId.isBlank()) {
-            return false;
+            return ItemStack.EMPTY;
         }
         ItemStack main = minecraft.player.getMainHandItem();
         if (main.is(ModItems.RADIO_ITEM) && radioId.equals(RadioItem.getRadioId(main))) {
-            return true;
+            return main;
         }
         ItemStack off = minecraft.player.getOffhandItem();
-        return off.is(ModItems.RADIO_ITEM) && radioId.equals(RadioItem.getRadioId(off));
+        if (off.is(ModItems.RADIO_ITEM) && radioId.equals(RadioItem.getRadioId(off))) {
+            return off;
+        }
+        return ItemStack.EMPTY;
     }
 
     private String radioIdFromStack(ItemStack stack) {

@@ -2,6 +2,7 @@ package net.jacobwasbeast.mediaradio.client.render;
 
 import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
+import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -22,9 +23,11 @@ public final class RadioHeldOverlayRenderer {
             return;
         }
 
-        boolean holdingRadio = minecraft.player.getMainHandItem().is(ModItems.RADIO_ITEM)
-                || minecraft.player.getOffhandItem().is(ModItems.RADIO_ITEM);
-        if (!holdingRadio) {
+        var main = minecraft.player.getMainHandItem();
+        var off = minecraft.player.getOffhandItem();
+        boolean mainHandShowsOverlay = main.is(ModItems.RADIO_ITEM) && !RadioItem.isPlaceMode(main);
+        boolean offHandShowsOverlay = off.is(ModItems.RADIO_ITEM) && !RadioItem.isPlaceMode(off);
+        if (!mainHandShowsOverlay && !offHandShowsOverlay) {
             return;
         }
 
@@ -103,4 +106,3 @@ public final class RadioHeldOverlayRenderer {
         return String.format("%02d:%02d", minutes, seconds);
     }
 }
-
