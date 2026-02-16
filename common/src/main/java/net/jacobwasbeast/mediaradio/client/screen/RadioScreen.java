@@ -395,9 +395,7 @@ public class RadioScreen extends Screen {
         guiGraphics.fill(panelX, panelY, panelX + PANEL_WIDTH, panelY + HEADER_HEIGHT, COLOR_HEADER);
         drawOutline(guiGraphics, panelX, panelY, PANEL_WIDTH, PANEL_HEIGHT, COLOR_STROKE);
 
-        String contextText = isBlockMode() ? "Placed Radio" : "Handheld Radio";
         guiGraphics.drawString(font, "MEDIA RADIO", panelX + 16, panelY + 16, COLOR_TEXT, false);
-        guiGraphics.drawString(font, contextText, panelX + PANEL_WIDTH - 184, panelY + 16, COLOR_ACCENT_ALT, false);
 
         switch (tab) {
             case NOW -> renderNowTab(guiGraphics);
