@@ -72,14 +72,17 @@ public class ClientMediaRepository {
     }
 
     public synchronized List<SharedMediaSnapshot.PlaylistEntry> getSortedPlaylists() {
+        PlayerIdentity identity = localPlayerIdentity();
         return snapshot.playlists.values().stream()
+                .filter(entry -> entry != null && entry.canView(identity.playerId(), identity.playerName()))
                 .sorted(Comparator.comparing(entry -> entry.name == null || entry.name.isBlank() ? entry.id : entry.name, String.CASE_INSENSITIVE_ORDER))
                 .toList();
     }
 
     public synchronized List<SharedMediaSnapshot.MediaEntry> getPlaylistMedia(String playlistId) {
+        PlayerIdentity identity = localPlayerIdentity();
         SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
-        if (playlistEntry == null || playlistEntry.mediaIds == null) {
+        if (playlistEntry == null || playlistEntry.mediaIds == null || !playlistEntry.canView(identity.playerId(), identity.playerName())) {
             return List.of();
         }
 
@@ -117,19 +120,44 @@ public class ClientMediaRepository {
     }
 
     public synchronized String createPlaylist(String name) {
-        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.createPlaylist(name);
+        return createPlaylist(name, SharedMediaSnapshot.PlaylistAccess.PRIVATE);
+    }
+
+    public synchronized String createPlaylist(String name, SharedMediaSnapshot.PlaylistAccess access) {
+        PlayerIdentity identity = localPlayerIdentity();
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.createPlaylist(name, identity.playerId(), identity.playerName(), access);
         persistAndUpload();
         return playlistEntry.id;
     }
 
     public synchronized void deletePlaylist(String playlistId) {
+        if (!canEditPlaylist(playlistId)) {
+            return;
+        }
         snapshot.playlists.remove(playlistId);
         persistAndUpload();
     }
 
+    public synchronized boolean renamePlaylist(String playlistId, String newName) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null || !canEditPlaylist(playlistId)) {
+            return false;
+        }
+        String resolvedName = newName == null ? "" : newName.trim();
+        if (resolvedName.isBlank()) {
+            return false;
+        }
+        if (resolvedName.equals(playlistEntry.name)) {
+            return true;
+        }
+        playlistEntry.name = resolvedName;
+        persistAndUpload();
+        return true;
+    }
+
     public synchronized void addMediaToPlaylist(String playlistId, String mediaId) {
         SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
-        if (playlistEntry == null || !snapshot.library.containsKey(mediaId)) {
+        if (playlistEntry == null || !snapshot.library.containsKey(mediaId) || !canEditPlaylist(playlistId)) {
             return;
         }
         if (!playlistEntry.mediaIds.contains(mediaId)) {
@@ -140,7 +168,7 @@ public class ClientMediaRepository {
 
     public synchronized void removeMediaFromPlaylist(String playlistId, int index) {
         SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
-        if (playlistEntry == null || index < 0 || index >= playlistEntry.mediaIds.size()) {
+        if (playlistEntry == null || index < 0 || index >= playlistEntry.mediaIds.size() || !canEditPlaylist(playlistId)) {
             return;
         }
         playlistEntry.mediaIds.remove(index);
@@ -148,6 +176,9 @@ public class ClientMediaRepository {
     }
 
     public synchronized void setQueueFromPlaylist(String playlistId) {
+        if (!canViewPlaylist(playlistId)) {
+            return;
+        }
         QueueState queueState = activeQueueState();
         SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
         clearQueueState(queueState);
@@ -165,6 +196,108 @@ public class ClientMediaRepository {
             queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
         }
         saveCache();
+    }
+
+    public synchronized boolean canViewPlaylist(String playlistId) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null) {
+            return false;
+        }
+        PlayerIdentity identity = localPlayerIdentity();
+        return playlistEntry.canView(identity.playerId(), identity.playerName());
+    }
+
+    public synchronized boolean canEditPlaylist(String playlistId) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null) {
+            return false;
+        }
+        PlayerIdentity identity = localPlayerIdentity();
+        return playlistEntry.canEdit(identity.playerId());
+    }
+
+    public synchronized SharedMediaSnapshot.PlaylistAccess getPlaylistAccess(String playlistId) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null || playlistEntry.access == null) {
+            return SharedMediaSnapshot.PlaylistAccess.PRIVATE;
+        }
+        return playlistEntry.access;
+    }
+
+    public synchronized void setPlaylistAccess(String playlistId, SharedMediaSnapshot.PlaylistAccess access) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null || access == null || !canEditPlaylist(playlistId)) {
+            return;
+        }
+        playlistEntry.access = access;
+        persistAndUpload();
+    }
+
+    public synchronized List<String> getPlaylistInvites(String playlistId) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null) {
+            return List.of();
+        }
+        return playlistEntry.invitesView();
+    }
+
+    public synchronized void setPlaylistInvites(String playlistId, List<String> invites) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null || !canEditPlaylist(playlistId)) {
+            return;
+        }
+        playlistEntry.setInvites(invites);
+        persistAndUpload();
+    }
+
+    public synchronized String getPlaylistOwnerName(String playlistId) {
+        SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
+        if (playlistEntry == null || playlistEntry.ownerName == null || playlistEntry.ownerName.isBlank()) {
+            return "Unknown";
+        }
+        return playlistEntry.ownerName;
+    }
+
+    public synchronized List<SharedMediaSnapshot.PlaylistEntry> getImportableGlobalPlaylists() {
+        PlayerIdentity identity = localPlayerIdentity();
+        return snapshot.playlists.values().stream()
+                .filter(entry -> entry != null
+                        && entry.access == SharedMediaSnapshot.PlaylistAccess.GLOBAL
+                        && entry.canView(identity.playerId(), identity.playerName()))
+                .sorted(Comparator.comparing(entry -> entry.name == null || entry.name.isBlank() ? entry.id : entry.name, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+    }
+
+    public synchronized List<SharedMediaSnapshot.PlaylistEntry> getImportableInvitedPlaylists() {
+        PlayerIdentity identity = localPlayerIdentity();
+        return snapshot.playlists.values().stream()
+                .filter(entry -> entry != null
+                        && entry.access == SharedMediaSnapshot.PlaylistAccess.INVITES
+                        && entry.isInvited(identity.playerId(), identity.playerName()))
+                .sorted(Comparator.comparing(entry -> entry.name == null || entry.name.isBlank() ? entry.id : entry.name, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+    }
+
+    public synchronized String importPlaylistCopy(String sourcePlaylistId, String playlistName, SharedMediaSnapshot.PlaylistAccess access) {
+        SharedMediaSnapshot.PlaylistEntry source = snapshot.playlists.get(sourcePlaylistId);
+        if (source == null || !canViewPlaylist(sourcePlaylistId)) {
+            return "";
+        }
+
+        String resolvedName = playlistName == null || playlistName.isBlank()
+                ? "Copy of " + (source.name == null || source.name.isBlank() ? source.id : source.name)
+                : playlistName.trim();
+        SharedMediaSnapshot.PlaylistEntry copied = snapshot.createPlaylist(resolvedName, localPlayerIdentity().playerId(), localPlayerIdentity().playerName(), access);
+        copied.thumbnail = source.thumbnail;
+        if (source.mediaIds != null) {
+            for (String mediaId : source.mediaIds) {
+                if (snapshot.library.containsKey(mediaId) && !copied.mediaIds.contains(mediaId)) {
+                    copied.mediaIds.add(mediaId);
+                }
+            }
+        }
+        persistAndUpload();
+        return copied.id;
     }
 
     public synchronized void enqueue(String mediaId) {
@@ -684,6 +817,25 @@ public class ClientMediaRepository {
         return radioId;
     }
 
+    private PlayerIdentity localPlayerIdentity() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft != null && minecraft.player != null) {
+            return new PlayerIdentity(
+                    safe(minecraft.player.getStringUUID()),
+                    safe(minecraft.player.getGameProfile().getName())
+            );
+        }
+        if (minecraft != null && minecraft.getUser() != null) {
+            String profileId = minecraft.getUser().getProfileId() == null ? "" : minecraft.getUser().getProfileId().toString();
+            return new PlayerIdentity(safe(profileId), safe(minecraft.getUser().getName()));
+        }
+        return new PlayerIdentity("", "");
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     private Path getCacheFile() {
         return Minecraft.getInstance().gameDirectory.toPath().resolve("config").resolve("mediaradio-client-cache.json");
     }
@@ -746,6 +898,9 @@ public class ClientMediaRepository {
         private String title = "";
         private String artist = "";
         private String thumbnail = "";
+    }
+
+    private record PlayerIdentity(String playerId, String playerName) {
     }
 
     public enum LoopMode {

@@ -131,6 +131,48 @@ public class LavaPlayerAccess {
         return future.orTimeout(20, TimeUnit.SECONDS);
     }
 
+    public CompletableFuture<List<SearchResult>> loadPlaylistTracks(String identifier, int maxTracks) {
+        String normalizedIdentifier = normalizeIdentifier(identifier);
+        if (normalizedIdentifier.isBlank()) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+
+        int limit = Math.max(1, maxTracks);
+        CompletableFuture<List<SearchResult>> future = new CompletableFuture<>();
+        audioPlayerManager.loadItemOrdered(this, normalizedIdentifier, new AudioLoadResultHandler() {
+            @Override
+            public void trackLoaded(AudioTrack track) {
+                future.complete(List.of(toSearchResult(track)));
+            }
+
+            @Override
+            public void playlistLoaded(AudioPlaylist playlist) {
+                List<SearchResult> results = new ArrayList<>();
+                for (AudioTrack track : playlist.getTracks()) {
+                    if (track == null) {
+                        continue;
+                    }
+                    results.add(toSearchResult(track));
+                    if (results.size() >= limit) {
+                        break;
+                    }
+                }
+                future.complete(results);
+            }
+
+            @Override
+            public void noMatches() {
+                future.complete(List.of());
+            }
+
+            @Override
+            public void loadFailed(FriendlyException exception) {
+                future.completeExceptionally(exception);
+            }
+        });
+        return future.orTimeout(25, TimeUnit.SECONDS);
+    }
+
     public OpenedTrack openTrack(AudioTrack sourceTrack, long positionMs) {
         AudioPlayer audioPlayer = audioPlayerManager.createPlayer();
         AudioTrack track = sourceTrack.makeClone();

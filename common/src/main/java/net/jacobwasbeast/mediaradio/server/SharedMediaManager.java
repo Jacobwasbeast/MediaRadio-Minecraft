@@ -14,6 +14,8 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 public class SharedMediaManager {
@@ -32,13 +34,20 @@ public class SharedMediaManager {
             return;
         }
 
-        SharedMediaSnapshot snapshot = SharedMediaSnapshot.fromJson(json);
-        String sanitizedJson = snapshot.toJson();
-
         SharedMediaSavedData data = SharedMediaSavedData.get(player.server);
-        data.setSnapshotJson(sanitizedJson);
+        SharedMediaSnapshot currentSnapshot = SharedMediaSnapshot.fromJson(data.getSnapshotJson());
+        SharedMediaSnapshot incomingSnapshot = SharedMediaSnapshot.fromJson(json);
+        SharedMediaSnapshot mergedSnapshot = mergeSnapshotForPlayer(
+                currentSnapshot,
+                incomingSnapshot,
+                player.getStringUUID(),
+                player.getGameProfile().getName()
+        );
+        String mergedJson = mergedSnapshot.toJson();
 
-        ModNetworking.broadcastSharedSnapshot(player.server, sanitizedJson);
+        data.setSnapshotJson(mergedJson);
+
+        ModNetworking.broadcastSharedSnapshot(player.server, mergedJson);
     }
 
     public static void handleRadioControl(ServerPlayer player, ServerboundRadioControlMessage message) {
@@ -194,5 +203,96 @@ public class SharedMediaManager {
 
     private static String safe(String value) {
         return value == null ? "" : value;
+    }
+
+    private static SharedMediaSnapshot mergeSnapshotForPlayer(
+            SharedMediaSnapshot current,
+            SharedMediaSnapshot incoming,
+            String playerId,
+            String playerName
+    ) {
+        SharedMediaSnapshot merged = new SharedMediaSnapshot();
+
+        // Library remains collaborative/global and follows incoming client state.
+        merged.library.putAll(incoming.library);
+
+        // Start from current playlists so unauthorized deletions/edits are ignored.
+        for (Map.Entry<String, SharedMediaSnapshot.PlaylistEntry> entry : current.playlists.entrySet()) {
+            merged.playlists.put(entry.getKey(), clonePlaylist(entry.getValue()));
+        }
+
+        // Apply owner-authorized deletions.
+        for (Map.Entry<String, SharedMediaSnapshot.PlaylistEntry> entry : current.playlists.entrySet()) {
+            String playlistId = entry.getKey();
+            SharedMediaSnapshot.PlaylistEntry existing = entry.getValue();
+            if (!incoming.playlists.containsKey(playlistId) && existing != null && existing.canEdit(playerId)) {
+                merged.playlists.remove(playlistId);
+            }
+        }
+
+        // Apply incoming updates and creations, bounded by ownership rules.
+        for (Map.Entry<String, SharedMediaSnapshot.PlaylistEntry> entry : incoming.playlists.entrySet()) {
+            String playlistId = entry.getKey();
+            SharedMediaSnapshot.PlaylistEntry incomingEntry = clonePlaylist(entry.getValue());
+            if (incomingEntry == null) {
+                continue;
+            }
+
+            SharedMediaSnapshot.PlaylistEntry currentEntry = current.playlists.get(playlistId);
+            if (currentEntry == null) {
+                // New playlist creation must be owned by this player (or unspecified ownership).
+                if (!incomingEntry.ownerId.isBlank() && !incomingEntry.ownerId.equals(playerId)) {
+                    continue;
+                }
+                incomingEntry.ownerId = playerId;
+                incomingEntry.ownerName = safe(playerName);
+                merged.playlists.put(playlistId, incomingEntry);
+                continue;
+            }
+
+            if (!currentEntry.canEdit(playerId)) {
+                continue;
+            }
+
+            // Preserve canonical owner identity.
+            if (!currentEntry.ownerId.isBlank()) {
+                incomingEntry.ownerId = currentEntry.ownerId;
+            } else {
+                incomingEntry.ownerId = playerId;
+            }
+            if (!currentEntry.ownerName.isBlank()) {
+                incomingEntry.ownerName = currentEntry.ownerName;
+            } else {
+                incomingEntry.ownerName = safe(playerName);
+            }
+            merged.playlists.put(playlistId, incomingEntry);
+        }
+
+        // Drop playlist media references that no longer exist in library.
+        merged.playlists.values().forEach(playlist -> {
+            if (playlist != null && playlist.mediaIds != null) {
+                playlist.mediaIds.removeIf(mediaId -> mediaId == null || mediaId.isBlank() || !merged.library.containsKey(mediaId));
+            }
+        });
+
+        return merged.sanitize();
+    }
+
+    private static SharedMediaSnapshot.PlaylistEntry clonePlaylist(SharedMediaSnapshot.PlaylistEntry source) {
+        if (source == null) {
+            return null;
+        }
+        SharedMediaSnapshot.PlaylistEntry copy = new SharedMediaSnapshot.PlaylistEntry();
+        copy.id = source.id;
+        copy.name = source.name;
+        copy.thumbnail = source.thumbnail;
+        copy.mediaIds = source.mediaIds == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.mediaIds);
+        copy.ownerId = source.ownerId;
+        copy.ownerName = source.ownerName;
+        copy.access = source.access;
+        copy.invitedPlayerIds = source.invitedPlayerIds == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.invitedPlayerIds);
+        copy.invitedPlayerNames = source.invitedPlayerNames == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.invitedPlayerNames);
+        copy.sanitize();
+        return copy;
     }
 }

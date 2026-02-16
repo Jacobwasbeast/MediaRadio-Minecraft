@@ -69,12 +69,17 @@ public class RadioScreen extends Screen {
     private Tab tab = Tab.NOW;
     private LibraryView libraryView = LibraryView.BROWSE;
     private SourceMode sourceMode = SourceMode.YOUTUBE_SEARCH;
+    private PlaylistPage playlistPage = PlaylistPage.BROWSE;
+    private PlaylistImportSource playlistImportSource = PlaylistImportSource.YOUTUBE;
 
     private EditBox urlInput;
     private EditBox titleInput;
     private EditBox artistInput;
     private EditBox thumbnailInput;
     private EditBox playlistNameInput;
+    private EditBox playlistInviteInput;
+    private EditBox importPlaylistSourceInput;
+    private EditBox importPlaylistNameInput;
 
     private int panelX;
     private int panelY;
@@ -88,6 +93,7 @@ public class RadioScreen extends Screen {
     private int playlistScroll;
     private int playlistTrackScroll;
     private int sourceResultScroll;
+    private int playlistImportScroll;
 
     private String selectedPlaylistId = "";
 
@@ -98,9 +104,13 @@ public class RadioScreen extends Screen {
     private String draftArtist = "";
     private String draftThumbnail = "";
     private String draftPlaylistName = "";
+    private String draftPlaylistInvites = "";
+    private String draftImportPlaylistSource = "";
+    private String draftImportPlaylistName = "";
 
     private StyledButton pauseResumeButton;
     private StyledButton loopModeButton;
+    private StyledButton playlistAccessButton;
     private boolean timelineDragging;
     private String lastPersistedQueueState = "";
     private String lastPersistedRuntimeKey = "";
@@ -109,6 +119,10 @@ public class RadioScreen extends Screen {
     private int selectedSourceResultIndex = -1;
     private boolean sourceSearchLoading;
     private String sourceStatusMessage = "Choose a source mode, then search or add.";
+    private final List<LavaPlayerAccess.SearchResult> importYoutubeTracks = new ArrayList<>();
+    private int selectedImportIndex = -1;
+    private boolean playlistImportLoading;
+    private String playlistImportStatus = "Pick an import source to begin.";
 
     private RadioScreen(BlockPos blockPos, InteractionHand hand) {
         super(Component.literal("Media Radio"));
@@ -197,10 +211,20 @@ public class RadioScreen extends Screen {
         if (playlistNameInput != null) {
             playlistNameInput.tick();
         }
+        if (playlistInviteInput != null) {
+            playlistInviteInput.tick();
+        }
+        if (importPlaylistSourceInput != null) {
+            importPlaylistSourceInput.tick();
+        }
+        if (importPlaylistNameInput != null) {
+            importPlaylistNameInput.tick();
+        }
 
         clampSelections();
         updatePauseResumeButtonLabel();
         persistRuntimeState();
+        updatePlaylistAccessButtonLabel();
     }
 
     @Override
@@ -246,6 +270,15 @@ public class RadioScreen extends Screen {
         }
         if (playlistNameInput != null) {
             draftPlaylistName = playlistNameInput.getValue();
+        }
+        if (playlistInviteInput != null) {
+            draftPlaylistInvites = playlistInviteInput.getValue();
+        }
+        if (importPlaylistSourceInput != null) {
+            draftImportPlaylistSource = importPlaylistSourceInput.getValue();
+        }
+        if (importPlaylistNameInput != null) {
+            draftImportPlaylistName = importPlaylistNameInput.getValue();
         }
     }
 
@@ -369,23 +402,95 @@ public class RadioScreen extends Screen {
     }
 
     private void buildPlaylistsTab() {
+        if (playlistPage == PlaylistPage.IMPORT) {
+            buildPlaylistImportPage();
+            return;
+        }
+        buildPlaylistBrowsePage();
+    }
+
+    private void buildPlaylistBrowsePage() {
         int x = contentX();
         int y = contentY();
         int w = contentW();
+        int topButtonW = 86;
+        int topGap = 6;
 
-        playlistNameInput = createInput(x, y, w - 196, 20, "Playlist name");
+        playlistNameInput = createInput(x, y, w - ((topButtonW * 4) + (topGap * 3) + 8), 20, "Playlist name");
         playlistNameInput.setHint(Component.literal("Playlist name"));
         playlistNameInput.setValue(draftPlaylistName);
         addRenderableWidget(playlistNameInput);
 
-        addRenderableWidget(new StyledButton(x + w - 190, y, 92, 20, Component.literal("＋ Create"), this::createPlaylist, true, false));
-        addRenderableWidget(new StyledButton(x + w - 92, y, 92, 20, Component.literal("🗑 Delete"), this::deleteSelectedPlaylist, false, false));
+        StyledButton createButton = new StyledButton(x + w - ((topButtonW * 4) + (topGap * 3)), y, topButtonW, 20, Component.literal("＋ Create"), this::createPlaylist, true, false);
+        addRenderableWidget(createButton);
+        StyledButton renameButton = new StyledButton(x + w - ((topButtonW * 3) + (topGap * 2)), y, topButtonW, 20, Component.literal("✎ Rename"), this::renameSelectedPlaylist, false, false);
+        addRenderableWidget(renameButton);
+        StyledButton deleteButton = new StyledButton(x + w - ((topButtonW * 2) + topGap), y, topButtonW, 20, Component.literal("🗑 Delete"), this::deleteSelectedPlaylist, false, false);
+        addRenderableWidget(deleteButton);
+        StyledButton importButton = new StyledButton(x + w - topButtonW, y, topButtonW, 20, Component.literal("⭳ Import"), this::openPlaylistImportPage, false, false);
+        addRenderableWidget(importButton);
+
+        playlistInviteInput = createInput(x, y + 26, w - 220, 20, "Invites (comma-separated player names)");
+        playlistInviteInput.setHint(Component.literal("Invites (comma-separated player names)"));
+        playlistInviteInput.setValue(draftPlaylistInvites);
+        addRenderableWidget(playlistInviteInput);
+        StyledButton inviteApplyButton = new StyledButton(x + w - 214, y + 26, 106, 20, Component.literal("✓ Set Invites"), this::applyPlaylistInvites, false, false);
+        addRenderableWidget(inviteApplyButton);
+        playlistAccessButton = new StyledButton(x + w - 102, y + 26, 102, 20, Component.literal("Access"), this::cycleSelectedPlaylistAccess, false, false);
+        addRenderableWidget(playlistAccessButton);
+
+        boolean canEditSelected = !selectedPlaylistId.isBlank() && ClientMediaRepository.getInstance().canEditPlaylist(selectedPlaylistId);
+        renameButton.active = canEditSelected;
+        deleteButton.active = canEditSelected;
+        inviteApplyButton.active = canEditSelected;
+        if (playlistAccessButton != null) {
+            playlistAccessButton.active = canEditSelected;
+        }
+        updatePlaylistAccessButtonLabel();
 
         int footerY = panelY + PANEL_HEIGHT - 34;
-        addRenderableWidget(new StyledButton(x, footerY, 120, 22, Component.literal("▶ Play List"), this::playSelectedPlaylist, true, false));
-        addRenderableWidget(new StyledButton(x + 126, footerY, 120, 22, Component.literal("▶ Play Song"), this::playSelectedPlaylistTrack, false, false));
-        addRenderableWidget(new StyledButton(x + 252, footerY, 136, 22, Component.literal("➕ Queue Song"), this::queueSelectedPlaylistTrack, false, false));
-        addRenderableWidget(new StyledButton(x + 394, footerY, 104, 22, Component.literal("✖ Remove"), this::removeSelectedPlaylistTrack, false, false));
+        StyledButton playListButton = new StyledButton(x, footerY, 120, 22, Component.literal("▶ Play List"), this::playSelectedPlaylist, true, false);
+        addRenderableWidget(playListButton);
+        StyledButton playSongButton = new StyledButton(x + 126, footerY, 120, 22, Component.literal("▶ Play Song"), this::playSelectedPlaylistTrack, false, false);
+        addRenderableWidget(playSongButton);
+        StyledButton queueSongButton = new StyledButton(x + 252, footerY, 136, 22, Component.literal("➕ Queue Song"), this::queueSelectedPlaylistTrack, false, false);
+        addRenderableWidget(queueSongButton);
+        StyledButton removeSongButton = new StyledButton(x + 394, footerY, 104, 22, Component.literal("✖ Remove"), this::removeSelectedPlaylistTrack, false, false);
+        addRenderableWidget(removeSongButton);
+        removeSongButton.active = canEditSelected;
+    }
+
+    private void buildPlaylistImportPage() {
+        int x = contentX();
+        int y = contentY();
+        int w = contentW();
+        int modeY = y;
+        int modeW = 118;
+        int modeGap = 6;
+
+        addRenderableWidget(new StyledButton(x + 8, modeY, modeW, 20, Component.literal("YouTube"), () -> setPlaylistImportSource(PlaylistImportSource.YOUTUBE), false, playlistImportSource == PlaylistImportSource.YOUTUBE));
+        addRenderableWidget(new StyledButton(x + 8 + modeW + modeGap, modeY, modeW, 20, Component.literal("Global"), () -> setPlaylistImportSource(PlaylistImportSource.GLOBAL), false, playlistImportSource == PlaylistImportSource.GLOBAL));
+        addRenderableWidget(new StyledButton(x + 8 + ((modeW + modeGap) * 2), modeY, modeW, 20, Component.literal("Invites"), () -> setPlaylistImportSource(PlaylistImportSource.INVITES), false, playlistImportSource == PlaylistImportSource.INVITES));
+        addRenderableWidget(new StyledButton(x + w - 106, modeY, 106, 20, Component.literal("◀ Back"), this::closePlaylistImportPage, true, false));
+
+        importPlaylistSourceInput = createInput(x + 8, y + 52, w - 16, 20, playlistImportSource.sourceLabel);
+        importPlaylistSourceInput.setHint(Component.literal(playlistImportSource.sourceHint));
+        importPlaylistSourceInput.setValue(draftImportPlaylistSource);
+        addRenderableWidget(importPlaylistSourceInput);
+
+        importPlaylistNameInput = createInput(x + 8, y + 78, w - 16, 20, "New playlist name (optional)");
+        importPlaylistNameInput.setHint(Component.literal("New playlist name (optional)"));
+        importPlaylistNameInput.setValue(draftImportPlaylistName);
+        addRenderableWidget(importPlaylistNameInput);
+
+        int actionY = y + 104;
+        if (playlistImportSource == PlaylistImportSource.YOUTUBE) {
+            addRenderableWidget(new StyledButton(x + 8, actionY, 140, 20, Component.literal("🔎 Load Playlist"), this::loadYoutubePlaylistForImport, true, false));
+            addRenderableWidget(new StyledButton(x + 154, actionY, 166, 20, Component.literal("⭳ Import As New"), this::importYoutubePlaylistAsNew, false, false));
+        } else {
+            addRenderableWidget(new StyledButton(x + 8, actionY, 140, 20, Component.literal("⭳ Import Selected"), this::importSelectedSharedPlaylistCopy, true, false));
+            addRenderableWidget(new StyledButton(x + 154, actionY, 166, 20, Component.literal("↻ Refresh"), this::refreshPlaylistImportLists, false, false));
+        }
     }
 
     @Override
@@ -610,12 +715,20 @@ public class RadioScreen extends Screen {
     }
 
     private void renderPlaylistsTab(GuiGraphics guiGraphics) {
-        int listY = contentY() + 30;
+        if (playlistPage == PlaylistPage.IMPORT) {
+            renderPlaylistImportPage(guiGraphics);
+            return;
+        }
+        renderPlaylistBrowsePage(guiGraphics);
+    }
+
+    private void renderPlaylistBrowsePage(GuiGraphics guiGraphics) {
+        int listY = contentY() + 56;
         int leftX = contentX();
         int leftW = 244;
         int rightX = leftX + leftW + 10;
         int rightW = contentW() - leftW - 10;
-        int listH = contentH() - 66;
+        int listH = contentH() - 92;
 
         guiGraphics.fill(leftX, listY, leftX + leftW, listY + listH, COLOR_CARD);
         guiGraphics.fill(rightX, listY, rightX + rightW, listY + listH, COLOR_CARD);
@@ -627,7 +740,7 @@ public class RadioScreen extends Screen {
 
         List<SharedMediaSnapshot.PlaylistEntry> playlists = ClientMediaRepository.getInstance().getSortedPlaylists();
         int rowStartY = listY + 24;
-        int maxPlaylistRows = playlistVisibleRows(listH);
+        int maxPlaylistRows = playlistVisibleRows(listH - 18);
         int playlistStart = clampScroll(playlistScroll, playlists.size(), maxPlaylistRows);
         playlistScroll = playlistStart;
         int playlistEnd = Math.min(playlists.size(), playlistStart + maxPlaylistRows);
@@ -640,11 +753,13 @@ public class RadioScreen extends Screen {
 
             SharedMediaSnapshot.PlaylistEntry playlist = playlists.get(index);
             String label = playlist.name == null || playlist.name.isBlank() ? playlist.id : playlist.name;
-            guiGraphics.drawString(font, trim(label, 30), leftX + 10, rowTextY(lineTop, PLAYLIST_ROW_HEIGHT), selected ? 0xFFFFFFFF : COLOR_TEXT, false);
+            String access = playlist.access == null ? "Private" : playlist.access.label();
+            guiGraphics.drawString(font, trim(label, 23), leftX + 10, rowTextY(lineTop, PLAYLIST_ROW_HEIGHT), selected ? 0xFFFFFFFF : COLOR_TEXT, false);
+            guiGraphics.drawString(font, trim(access, 8), leftX + leftW - 58, rowTextY(lineTop, PLAYLIST_ROW_HEIGHT), COLOR_MUTED, false);
         }
 
         List<SharedMediaSnapshot.MediaEntry> tracks = ClientMediaRepository.getInstance().getPlaylistMedia(selectedPlaylistId);
-        int maxTrackRows = playlistTrackVisibleRows(listH);
+        int maxTrackRows = playlistTrackVisibleRows(listH - 18);
         int trackStart = clampScroll(playlistTrackScroll, tracks.size(), maxTrackRows);
         playlistTrackScroll = trackStart;
         int trackEnd = Math.min(tracks.size(), trackStart + maxTrackRows);
@@ -664,8 +779,80 @@ public class RadioScreen extends Screen {
             guiGraphics.drawString(font, trim(artist, 22), rightX + 38, lineTop + 16, COLOR_MUTED, false);
         }
 
+        SharedMediaSnapshot.PlaylistEntry selected = selectedPlaylistEntry(playlists);
+        String owner = selected == null ? "-" : (selected.ownerName == null || selected.ownerName.isBlank() ? "Unknown" : selected.ownerName);
+        String access = selected == null || selected.access == null ? "Private" : selected.access.label();
+        String inviteSummary = selected == null || selected.invitedPlayerNames == null || selected.invitedPlayerNames.isEmpty()
+                ? "none"
+                : trim(String.join(", ", selected.invitedPlayerNames), 34);
         guiGraphics.drawString(font, "Playlists: " + playlists.size(), leftX + 8, listY + listH - 16, COLOR_MUTED, false);
-        guiGraphics.drawString(font, "Songs: " + tracks.size(), rightX + 8, listY + listH - 16, COLOR_MUTED, false);
+        guiGraphics.drawString(font, "Songs: " + tracks.size(), rightX + 8, listY + listH - 28, COLOR_MUTED, false);
+        guiGraphics.drawString(font, "Owner: " + owner + "  Access: " + access, rightX + 8, listY + listH - 18, COLOR_MUTED, false);
+        guiGraphics.drawString(font, "Invites: " + inviteSummary, rightX + 8, listY + listH - 8, COLOR_MUTED, false);
+    }
+
+    private void renderPlaylistImportPage(GuiGraphics guiGraphics) {
+        int x = contentX();
+        int y = contentY();
+        int w = contentW();
+        int h = contentH();
+
+        int sourcePanelY = y + 22;
+        int sourcePanelH = 120;
+        guiGraphics.fill(x, sourcePanelY, x + w, sourcePanelY + sourcePanelH, COLOR_CARD_SOFT);
+        drawOutline(guiGraphics, x, sourcePanelY, w, sourcePanelH, 0x6653768F);
+        guiGraphics.drawString(font, "Import Source: " + playlistImportSource.label, x + 8, sourcePanelY + 6, COLOR_ACCENT, false);
+        guiGraphics.drawString(font, trim(playlistImportSource.helper, 66), x + 176, sourcePanelY + 6, COLOR_MUTED, false);
+
+        int listY = y + 152;
+        int listH = Math.max(SOURCE_ROW_HEIGHT + 36, h - 152);
+        guiGraphics.fill(x, listY, x + w, listY + listH, COLOR_CARD);
+        drawOutline(guiGraphics, x, listY, w, listH, 0x6653768F);
+
+        int statusColor = playlistImportLoading ? COLOR_ACCENT_ALT : COLOR_MUTED;
+        guiGraphics.drawString(font, trim(playlistImportStatus, 88), x + 8, listY + 8, statusColor, false);
+        int rowStartY = listY + 24;
+
+        if (playlistImportSource == PlaylistImportSource.YOUTUBE) {
+            int maxRows = sourceVisibleRows(listH);
+            int start = clampScroll(playlistImportScroll, importYoutubeTracks.size(), maxRows);
+            playlistImportScroll = start;
+            int end = Math.min(importYoutubeTracks.size(), start + maxRows);
+            for (int i = 0, index = start; index < end; i++, index++) {
+                LavaPlayerAccess.SearchResult track = importYoutubeTracks.get(index);
+                int lineTop = rowStartY + i * SOURCE_ROW_HEIGHT;
+                boolean selected = index == selectedImportIndex;
+                if (selected) {
+                    guiGraphics.fill(x + 6, lineTop - 1, x + w - 6, lineTop + SOURCE_ROW_HEIGHT - 1, 0xAA365D77);
+                }
+                String thumbnail = MediaMetadataResolver.bestThumbnail(track.thumbnail(), track.identifier());
+                drawListThumbnail(guiGraphics, thumbnail, x + 10, rowThumbY(lineTop, SOURCE_ROW_HEIGHT, SOURCE_THUMB_SIZE), SOURCE_THUMB_SIZE);
+                guiGraphics.drawString(font, trim(track.title(), 52), x + 46, lineTop + 6, selected ? 0xFFFFFFFF : COLOR_TEXT, false);
+                guiGraphics.drawString(font, trim(track.artist().isBlank() ? "Unknown Artist" : track.artist(), 40), x + 46, lineTop + 16, COLOR_MUTED, false);
+            }
+            guiGraphics.drawString(font, "Tracks: " + importYoutubeTracks.size(), x + 8, listY + listH - 16, COLOR_MUTED, false);
+            return;
+        }
+
+        List<SharedMediaSnapshot.PlaylistEntry> sources = getFilteredImportPlaylists();
+        int maxRows = playlistImportVisibleRows(listH);
+        int start = clampScroll(playlistImportScroll, sources.size(), maxRows);
+        playlistImportScroll = start;
+        int end = Math.min(sources.size(), start + maxRows);
+        for (int i = 0, index = start; index < end; i++, index++) {
+            SharedMediaSnapshot.PlaylistEntry playlist = sources.get(index);
+            int lineTop = rowStartY + i * PLAYLIST_ROW_HEIGHT;
+            boolean selected = index == selectedImportIndex;
+            if (selected) {
+                guiGraphics.fill(x + 6, lineTop - 1, x + w - 6, lineTop + PLAYLIST_ROW_HEIGHT - 1, 0xAA365D77);
+            }
+            String label = playlist.name == null || playlist.name.isBlank() ? playlist.id : playlist.name;
+            int count = playlist.mediaIds == null ? 0 : playlist.mediaIds.size();
+            String owner = playlist.ownerName == null || playlist.ownerName.isBlank() ? "Unknown" : playlist.ownerName;
+            guiGraphics.drawString(font, trim(label, 44), x + 10, rowTextY(lineTop, PLAYLIST_ROW_HEIGHT), selected ? 0xFFFFFFFF : COLOR_TEXT, false);
+            guiGraphics.drawString(font, "by " + trim(owner, 14) + " · " + count + " songs", x + w - 136, rowTextY(lineTop, PLAYLIST_ROW_HEIGHT), COLOR_MUTED, false);
+        }
+        guiGraphics.drawString(font, "Available: " + sources.size(), x + 8, listY + listH - 16, COLOR_MUTED, false);
     }
 
     @Override
@@ -733,31 +920,72 @@ public class RadioScreen extends Screen {
         }
 
         if (tab == Tab.PLAYLISTS) {
-            int listY = contentY() + 30;
+            if (playlistPage == PlaylistPage.IMPORT) {
+                int x = contentX();
+                int y = contentY();
+                int w = contentW();
+                int h = contentH();
+                int listY = y + 152;
+                int listH = Math.max(SOURCE_ROW_HEIGHT + 36, h - 152);
+                int rowStartY = listY + 24;
+                if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 24) {
+                    if (playlistImportSource == PlaylistImportSource.YOUTUBE) {
+                        int row = (int) ((mouseY - rowStartY) / SOURCE_ROW_HEIGHT);
+                        int maxRows = sourceVisibleRows(listH);
+                        int index = playlistImportScroll + row;
+                        if (row >= 0 && row < maxRows && index >= 0 && index < importYoutubeTracks.size()) {
+                            selectedImportIndex = index;
+                            return true;
+                        }
+                    } else {
+                        List<SharedMediaSnapshot.PlaylistEntry> importable = getFilteredImportPlaylists();
+                        int row = (int) ((mouseY - rowStartY) / PLAYLIST_ROW_HEIGHT);
+                        int maxRows = playlistImportVisibleRows(listH);
+                        int index = playlistImportScroll + row;
+                        if (row >= 0 && row < maxRows && index >= 0 && index < importable.size()) {
+                            selectedImportIndex = index;
+                            return true;
+                        }
+                    }
+                }
+                return super.mouseClicked(mouseX, mouseY, button);
+            }
+
+            int listY = contentY() + 56;
             int leftX = contentX();
             int leftW = 244;
             int rightX = leftX + leftW + 10;
             int rightW = contentW() - leftW - 10;
-            int listH = contentH() - 66;
+            int listH = contentH() - 92;
             int rowStartY = listY + 24;
 
-            if (mouseX >= leftX && mouseX <= leftX + leftW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
+            if (mouseX >= leftX && mouseX <= leftX + leftW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 18) {
                 int row = (int) ((mouseY - rowStartY) / PLAYLIST_ROW_HEIGHT);
                 List<SharedMediaSnapshot.PlaylistEntry> playlists = ClientMediaRepository.getInstance().getSortedPlaylists();
-                int maxRows = playlistVisibleRows(listH);
+                int maxRows = playlistVisibleRows(listH - 18);
                 int index = playlistScroll + row;
                 if (row >= 0 && row < maxRows && index >= 0 && index < playlists.size()) {
                     selectedPlaylistIndex = index;
                     selectedPlaylistId = playlists.get(index).id;
                     selectedPlaylistTrackIndex = -1;
+                    String selectedName = playlists.get(index).name == null || playlists.get(index).name.isBlank()
+                            ? playlists.get(index).id
+                            : playlists.get(index).name;
+                    draftPlaylistName = selectedName;
+                    if (playlistNameInput != null) {
+                        playlistNameInput.setValue(selectedName);
+                    }
+                    if (playlistInviteInput != null) {
+                        playlistInviteInput.setValue(String.join(", ", ClientMediaRepository.getInstance().getPlaylistInvites(selectedPlaylistId)));
+                    }
                     return true;
                 }
             }
 
-            if (mouseX >= rightX && mouseX <= rightX + rightW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
+            if (mouseX >= rightX && mouseX <= rightX + rightW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 18) {
                 int row = (int) ((mouseY - rowStartY) / MEDIA_ROW_HEIGHT);
                 List<SharedMediaSnapshot.MediaEntry> tracks = ClientMediaRepository.getInstance().getPlaylistMedia(selectedPlaylistId);
-                int maxRows = playlistTrackVisibleRows(listH);
+                int maxRows = playlistTrackVisibleRows(listH - 18);
                 int index = playlistTrackScroll + row;
                 if (row >= 0 && row < maxRows && index >= 0 && index < tracks.size()) {
                     selectedPlaylistTrackIndex = index;
@@ -833,23 +1061,43 @@ public class RadioScreen extends Screen {
         }
 
         if (tab == Tab.PLAYLISTS) {
-            int listY = contentY() + 30;
+            if (playlistPage == PlaylistPage.IMPORT) {
+                int x = contentX();
+                int y = contentY();
+                int w = contentW();
+                int h = contentH();
+                int listY = y + 152;
+                int listH = Math.max(SOURCE_ROW_HEIGHT + 36, h - 152);
+                int rowStartY = listY + 24;
+                if (mouseX >= x && mouseX <= x + w && mouseY >= rowStartY && mouseY <= rowStartY + listH - 24) {
+                    if (playlistImportSource == PlaylistImportSource.YOUTUBE) {
+                        playlistImportScroll = clampScroll(playlistImportScroll + step, importYoutubeTracks.size(), sourceVisibleRows(listH));
+                        return true;
+                    }
+                    int size = getFilteredImportPlaylists().size();
+                    playlistImportScroll = clampScroll(playlistImportScroll + step, size, playlistImportVisibleRows(listH));
+                    return true;
+                }
+                return super.mouseScrolled(mouseX, mouseY, deltaY);
+            }
+
+            int listY = contentY() + 56;
             int leftX = contentX();
             int leftW = 244;
             int rightX = leftX + leftW + 10;
             int rightW = contentW() - leftW - 10;
-            int listH = contentH() - 66;
+            int listH = contentH() - 92;
             int rowStartY = listY + 24;
 
-            if (mouseX >= leftX && mouseX <= leftX + leftW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
+            if (mouseX >= leftX && mouseX <= leftX + leftW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 18) {
                 int size = ClientMediaRepository.getInstance().getSortedPlaylists().size();
-                playlistScroll = clampScroll(playlistScroll + step, size, playlistVisibleRows(listH));
+                playlistScroll = clampScroll(playlistScroll + step, size, playlistVisibleRows(listH - 18));
                 return true;
             }
 
-            if (mouseX >= rightX && mouseX <= rightX + rightW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 30) {
+            if (mouseX >= rightX && mouseX <= rightX + rightW && mouseY >= rowStartY && mouseY <= rowStartY + listH - 18) {
                 int size = ClientMediaRepository.getInstance().getPlaylistMedia(selectedPlaylistId).size();
-                playlistTrackScroll = clampScroll(playlistTrackScroll + step, size, playlistTrackVisibleRows(listH));
+                playlistTrackScroll = clampScroll(playlistTrackScroll + step, size, playlistTrackVisibleRows(listH - 18));
                 return true;
             }
         }
@@ -1198,9 +1446,31 @@ public class RadioScreen extends Screen {
         if (name.isBlank()) {
             return;
         }
-        selectedPlaylistId = ClientMediaRepository.getInstance().createPlaylist(name);
+        selectedPlaylistId = ClientMediaRepository.getInstance().createPlaylist(name, SharedMediaSnapshot.PlaylistAccess.PRIVATE);
         draftPlaylistName = "";
+        draftPlaylistInvites = "";
         playlistNameInput.setValue("");
+        if (playlistInviteInput != null) {
+            playlistInviteInput.setValue("");
+        }
+        selectedPlaylistTrackIndex = -1;
+        playlistImportStatus = "Created playlist: " + trim(name, 32);
+    }
+
+    private void renameSelectedPlaylist() {
+        if (playlistNameInput == null || selectedPlaylistId.isBlank()) {
+            return;
+        }
+        String newName = playlistNameInput.getValue().trim();
+        if (newName.isBlank()) {
+            return;
+        }
+        boolean renamed = ClientMediaRepository.getInstance().renamePlaylist(selectedPlaylistId, newName);
+        if (!renamed) {
+            return;
+        }
+        draftPlaylistName = newName;
+        playlistImportStatus = "Renamed playlist: " + trim(newName, 32);
     }
 
     private void deleteSelectedPlaylist() {
@@ -1211,6 +1481,14 @@ public class RadioScreen extends Screen {
         selectedPlaylistId = "";
         selectedPlaylistIndex = -1;
         selectedPlaylistTrackIndex = -1;
+        draftPlaylistName = "";
+        draftPlaylistInvites = "";
+        if (playlistNameInput != null) {
+            playlistNameInput.setValue("");
+        }
+        if (playlistInviteInput != null) {
+            playlistInviteInput.setValue("");
+        }
     }
 
     private void playSelectedPlaylist() {
@@ -1249,6 +1527,192 @@ public class RadioScreen extends Screen {
         }
         ClientMediaRepository.getInstance().removeMediaFromPlaylist(selectedPlaylistId, selectedPlaylistTrackIndex);
         selectedPlaylistTrackIndex = -1;
+    }
+
+    private void cycleSelectedPlaylistAccess() {
+        if (selectedPlaylistId.isBlank()) {
+            return;
+        }
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        SharedMediaSnapshot.PlaylistAccess current = repository.getPlaylistAccess(selectedPlaylistId);
+        SharedMediaSnapshot.PlaylistAccess next = switch (current) {
+            case PRIVATE -> SharedMediaSnapshot.PlaylistAccess.INVITES;
+            case INVITES -> SharedMediaSnapshot.PlaylistAccess.GLOBAL;
+            case GLOBAL -> SharedMediaSnapshot.PlaylistAccess.PRIVATE;
+        };
+        repository.setPlaylistAccess(selectedPlaylistId, next);
+        updatePlaylistAccessButtonLabel();
+    }
+
+    private void applyPlaylistInvites() {
+        if (selectedPlaylistId.isBlank() || playlistInviteInput == null) {
+            return;
+        }
+        String raw = playlistInviteInput.getValue().trim();
+        List<String> invites = new ArrayList<>();
+        if (!raw.isBlank()) {
+            String[] parts = raw.split(",");
+            for (String part : parts) {
+                String name = part == null ? "" : part.trim();
+                if (!name.isBlank() && !invites.contains(name)) {
+                    invites.add(name);
+                }
+            }
+        }
+        ClientMediaRepository.getInstance().setPlaylistInvites(selectedPlaylistId, invites);
+    }
+
+    private void openPlaylistImportPage() {
+        playlistPage = PlaylistPage.IMPORT;
+        selectedImportIndex = -1;
+        playlistImportScroll = 0;
+        playlistImportStatus = "Pick an import source to begin.";
+        refreshPlaylistImportLists();
+        rebuildRadioWidgets();
+    }
+
+    private void closePlaylistImportPage() {
+        playlistPage = PlaylistPage.BROWSE;
+        rebuildRadioWidgets();
+    }
+
+    private void setPlaylistImportSource(PlaylistImportSource source) {
+        if (playlistImportSource == source) {
+            return;
+        }
+        playlistImportSource = source;
+        selectedImportIndex = -1;
+        playlistImportScroll = 0;
+        importYoutubeTracks.clear();
+        playlistImportStatus = source == PlaylistImportSource.YOUTUBE
+                ? "Paste a YouTube playlist URL, then load."
+                : "Select a playlist and import a local copy.";
+        rebuildRadioWidgets();
+    }
+
+    private void refreshPlaylistImportLists() {
+        selectedImportIndex = -1;
+        playlistImportScroll = 0;
+        if (playlistImportSource == PlaylistImportSource.GLOBAL) {
+            int count = ClientMediaRepository.getInstance().getImportableGlobalPlaylists().size();
+            playlistImportStatus = "Global playlists available: " + count;
+        } else if (playlistImportSource == PlaylistImportSource.INVITES) {
+            int count = ClientMediaRepository.getInstance().getImportableInvitedPlaylists().size();
+            playlistImportStatus = "Invited playlists available: " + count;
+        }
+    }
+
+    private void loadYoutubePlaylistForImport() {
+        String identifier = importPlaylistSourceInput == null ? "" : importPlaylistSourceInput.getValue().trim();
+        if (identifier.isBlank()) {
+            playlistImportStatus = "Enter a YouTube playlist URL first.";
+            return;
+        }
+        playlistImportLoading = true;
+        playlistImportStatus = "Loading playlist tracks...";
+        importYoutubeTracks.clear();
+        selectedImportIndex = -1;
+        playlistImportScroll = 0;
+
+        LavaPlayerAccess.get().loadPlaylistTracks(identifier, 200).whenComplete((tracks, error) -> {
+            if (minecraft == null) {
+                return;
+            }
+            minecraft.execute(() -> {
+                playlistImportLoading = false;
+                importYoutubeTracks.clear();
+                selectedImportIndex = -1;
+                playlistImportScroll = 0;
+                if (error != null) {
+                    playlistImportStatus = "Failed to load playlist.";
+                    return;
+                }
+                if (tracks != null) {
+                    importYoutubeTracks.addAll(tracks);
+                }
+                if (importYoutubeTracks.isEmpty()) {
+                    playlistImportStatus = "No tracks found.";
+                    return;
+                }
+                selectedImportIndex = 0;
+                playlistImportStatus = "Loaded " + importYoutubeTracks.size() + " tracks.";
+            });
+        });
+    }
+
+    private void importYoutubePlaylistAsNew() {
+        if (importYoutubeTracks.isEmpty()) {
+            playlistImportStatus = "Load a YouTube playlist first.";
+            return;
+        }
+        String name = importPlaylistNameInput == null ? "" : importPlaylistNameInput.getValue().trim();
+        if (name.isBlank()) {
+            name = "Imported YouTube Playlist";
+        }
+
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String playlistId = repository.createPlaylist(name, SharedMediaSnapshot.PlaylistAccess.PRIVATE);
+        for (LavaPlayerAccess.SearchResult track : importYoutubeTracks) {
+            SharedMediaSnapshot.MediaEntry entry = repository.upsertMedia(
+                    track.identifier(),
+                    track.title(),
+                    track.artist(),
+                    MediaMetadataResolver.bestThumbnail(track.thumbnail(), track.identifier()),
+                    List.of()
+            );
+            repository.addMediaToPlaylist(playlistId, entry.id);
+        }
+        selectedPlaylistId = playlistId;
+        playlistPage = PlaylistPage.BROWSE;
+        selectedPlaylistTrackIndex = -1;
+        playlistImportStatus = "Imported playlist: " + trim(name, 32);
+        rebuildRadioWidgets();
+    }
+
+    private void importSelectedSharedPlaylistCopy() {
+        List<SharedMediaSnapshot.PlaylistEntry> candidates = getFilteredImportPlaylists();
+        if (selectedImportIndex < 0 || selectedImportIndex >= candidates.size()) {
+            playlistImportStatus = "Select a playlist to import.";
+            return;
+        }
+        SharedMediaSnapshot.PlaylistEntry source = candidates.get(selectedImportIndex);
+        String desiredName = importPlaylistNameInput == null ? "" : importPlaylistNameInput.getValue().trim();
+        String playlistId = ClientMediaRepository.getInstance().importPlaylistCopy(
+                source.id,
+                desiredName,
+                SharedMediaSnapshot.PlaylistAccess.PRIVATE
+        );
+        if (playlistId.isBlank()) {
+            playlistImportStatus = "Import failed.";
+            return;
+        }
+        selectedPlaylistId = playlistId;
+        selectedPlaylistTrackIndex = -1;
+        playlistPage = PlaylistPage.BROWSE;
+        playlistImportStatus = "Imported: " + trim(source.name == null || source.name.isBlank() ? source.id : source.name, 32);
+        rebuildRadioWidgets();
+    }
+
+    private List<SharedMediaSnapshot.PlaylistEntry> getFilteredImportPlaylists() {
+        List<SharedMediaSnapshot.PlaylistEntry> base = playlistImportSource == PlaylistImportSource.GLOBAL
+                ? ClientMediaRepository.getInstance().getImportableGlobalPlaylists()
+                : ClientMediaRepository.getInstance().getImportableInvitedPlaylists();
+        String filter = importPlaylistSourceInput == null ? "" : importPlaylistSourceInput.getValue().trim().toLowerCase(Locale.ROOT);
+        if (filter.isBlank()) {
+            return base;
+        }
+        List<SharedMediaSnapshot.PlaylistEntry> filtered = new ArrayList<>();
+        for (SharedMediaSnapshot.PlaylistEntry playlist : base) {
+            if (playlist == null) {
+                continue;
+            }
+            String playlistName = playlist.name == null ? "" : playlist.name.toLowerCase(Locale.ROOT);
+            String ownerName = playlist.ownerName == null ? "" : playlist.ownerName.toLowerCase(Locale.ROOT);
+            if (playlistName.contains(filter) || ownerName.contains(filter)) {
+                filtered.add(playlist);
+            }
+        }
+        return filtered;
     }
 
     private void playQueueNext() {
@@ -1555,11 +2019,13 @@ public class RadioScreen extends Screen {
         }
 
         List<SharedMediaSnapshot.PlaylistEntry> playlists = repository.getSortedPlaylists();
+        SharedMediaSnapshot.PlaylistEntry selectedPlaylistEntry = null;
         if (!selectedPlaylistId.isBlank()) {
             boolean exists = false;
             for (int i = 0; i < playlists.size(); i++) {
                 if (selectedPlaylistId.equals(playlists.get(i).id)) {
                     selectedPlaylistIndex = i;
+                    selectedPlaylistEntry = playlists.get(i);
                     exists = true;
                     break;
                 }
@@ -1571,17 +2037,64 @@ public class RadioScreen extends Screen {
             }
         } else if (selectedPlaylistIndex >= 0 && selectedPlaylistIndex < playlists.size()) {
             selectedPlaylistId = playlists.get(selectedPlaylistIndex).id;
+            selectedPlaylistEntry = playlists.get(selectedPlaylistIndex);
         } else if (selectedPlaylistIndex >= playlists.size()) {
             selectedPlaylistIndex = playlists.isEmpty() ? -1 : playlists.size() - 1;
             selectedPlaylistId = selectedPlaylistIndex >= 0 ? playlists.get(selectedPlaylistIndex).id : "";
+            if (selectedPlaylistIndex >= 0) {
+                selectedPlaylistEntry = playlists.get(selectedPlaylistIndex);
+            }
         }
-        playlistScroll = clampScroll(playlistScroll, playlists.size(), playlistVisibleRows(contentH() - 66));
+        if (selectedPlaylistEntry == null && selectedPlaylistIndex >= 0 && selectedPlaylistIndex < playlists.size()) {
+            selectedPlaylistEntry = playlists.get(selectedPlaylistIndex);
+        }
+        if (playlistNameInput != null && !playlistNameInput.isFocused()) {
+            String selectedName = selectedPlaylistEntry == null
+                    ? draftPlaylistName
+                    : (selectedPlaylistEntry.name == null || selectedPlaylistEntry.name.isBlank()
+                    ? selectedPlaylistEntry.id
+                    : selectedPlaylistEntry.name);
+            if (selectedPlaylistEntry != null) {
+                draftPlaylistName = selectedName;
+            }
+            if (!selectedName.equals(playlistNameInput.getValue())) {
+                playlistNameInput.setValue(selectedName);
+            }
+        }
+        int playlistListH = contentH() - 92;
+        playlistScroll = clampScroll(playlistScroll, playlists.size(), playlistVisibleRows(Math.max(1, playlistListH - 18)));
 
         List<SharedMediaSnapshot.MediaEntry> playlistTracks = repository.getPlaylistMedia(selectedPlaylistId);
         if (selectedPlaylistTrackIndex >= playlistTracks.size()) {
             selectedPlaylistTrackIndex = playlistTracks.isEmpty() ? -1 : playlistTracks.size() - 1;
         }
-        playlistTrackScroll = clampScroll(playlistTrackScroll, playlistTracks.size(), playlistTrackVisibleRows(contentH() - 66));
+        playlistTrackScroll = clampScroll(playlistTrackScroll, playlistTracks.size(), playlistTrackVisibleRows(Math.max(1, playlistListH - 18)));
+        if (playlistInviteInput != null) {
+            List<String> invites = repository.getPlaylistInvites(selectedPlaylistId);
+            String inviteText = String.join(", ", invites);
+            if (!playlistInviteInput.isFocused()) {
+                playlistInviteInput.setValue(inviteText);
+            }
+        }
+
+        if (playlistPage == PlaylistPage.IMPORT) {
+            if (playlistImportSource == PlaylistImportSource.YOUTUBE) {
+                if (selectedImportIndex >= importYoutubeTracks.size()) {
+                    selectedImportIndex = importYoutubeTracks.isEmpty() ? -1 : importYoutubeTracks.size() - 1;
+                }
+                int importH = Math.max(SOURCE_ROW_HEIGHT + 36, contentH() - 152);
+                playlistImportScroll = clampScroll(playlistImportScroll, importYoutubeTracks.size(), sourceVisibleRows(importH));
+            } else {
+                List<SharedMediaSnapshot.PlaylistEntry> importable = playlistImportSource == PlaylistImportSource.GLOBAL
+                        ? repository.getImportableGlobalPlaylists()
+                        : repository.getImportableInvitedPlaylists();
+                if (selectedImportIndex >= importable.size()) {
+                    selectedImportIndex = importable.isEmpty() ? -1 : importable.size() - 1;
+                }
+                int importH = Math.max(SOURCE_ROW_HEIGHT + 36, contentH() - 152);
+                playlistImportScroll = clampScroll(playlistImportScroll, importable.size(), playlistImportVisibleRows(importH));
+            }
+        }
 
         List<SharedMediaSnapshot.MediaEntry> queue = repository.getQueueEntries();
         int queueCurrent = repository.getQueueIndex();
@@ -1714,6 +2227,14 @@ public class RadioScreen extends Screen {
         loopModeButton.setMessage(Component.literal(label));
     }
 
+    private void updatePlaylistAccessButtonLabel() {
+        if (playlistAccessButton == null || tab != Tab.PLAYLISTS || playlistPage != PlaylistPage.BROWSE) {
+            return;
+        }
+        SharedMediaSnapshot.PlaylistAccess access = ClientMediaRepository.getInstance().getPlaylistAccess(selectedPlaylistId);
+        playlistAccessButton.setMessage(Component.literal("Access: " + access.label()));
+    }
+
     private void drawTimelineBar(GuiGraphics guiGraphics, PlaybackView playback, int x, int y, int width, int height) {
         int barX = nowTimelineX();
         int barY = nowTimelineY();
@@ -1837,6 +2358,10 @@ public class RadioScreen extends Screen {
 
     private int playlistTrackVisibleRows(int listH) {
         return Math.max(1, (listH - 30) / MEDIA_ROW_HEIGHT);
+    }
+
+    private int playlistImportVisibleRows(int listH) {
+        return Math.max(1, (listH - 30) / PLAYLIST_ROW_HEIGHT);
     }
 
     private int nowRightActionY() {
@@ -2008,6 +2533,13 @@ public class RadioScreen extends Screen {
         return value.substring(0, maxLength - 3) + "...";
     }
 
+    private SharedMediaSnapshot.PlaylistEntry selectedPlaylistEntry(List<SharedMediaSnapshot.PlaylistEntry> playlists) {
+        if (playlists == null || playlists.isEmpty() || selectedPlaylistIndex < 0 || selectedPlaylistIndex >= playlists.size()) {
+            return null;
+        }
+        return playlists.get(selectedPlaylistIndex);
+    }
+
     private int clampScroll(int current, int itemCount, int visibleRows) {
         return Mth.clamp(current, 0, Math.max(0, itemCount - Math.max(1, visibleRows)));
     }
@@ -2111,6 +2643,44 @@ public class RadioScreen extends Screen {
     private enum LibraryView {
         BROWSE,
         SOURCES
+    }
+
+    private enum PlaylistPage {
+        BROWSE,
+        IMPORT
+    }
+
+    private enum PlaylistImportSource {
+        YOUTUBE(
+                "YouTube",
+                "Paste a YouTube playlist URL to import tracks into a new playlist.",
+                "YouTube playlist URL",
+                "https://www.youtube.com/playlist?list=..."
+        ),
+        GLOBAL(
+                "Global",
+                "Import a copy of playlists shared globally by other players.",
+                "Filter by playlist or owner (optional)",
+                "Type playlist/owner text to filter"
+        ),
+        INVITES(
+                "Invites",
+                "Import playlists you were invited to by other players.",
+                "Filter by playlist or owner (optional)",
+                "Type playlist/owner text to filter"
+        );
+
+        private final String label;
+        private final String helper;
+        private final String sourceLabel;
+        private final String sourceHint;
+
+        PlaylistImportSource(String label, String helper, String sourceLabel, String sourceHint) {
+            this.label = label;
+            this.helper = helper;
+            this.sourceLabel = sourceLabel;
+            this.sourceHint = sourceHint;
+        }
     }
 
     private enum SourceAction {
