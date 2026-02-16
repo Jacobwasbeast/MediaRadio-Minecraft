@@ -1130,10 +1130,10 @@ public class RadioScreen extends Screen {
         String artist = artistInput == null ? "" : artistInput.getValue().trim();
         String thumbnail = thumbnailInput == null ? "" : thumbnailInput.getValue().trim();
 
-        SharedMediaSnapshot.MediaEntry entry = ClientMediaRepository.getInstance().upsertMedia(url, title, artist, thumbnail, List.of());
+        SharedMediaSnapshot.MediaEntry entry = ClientMediaRepository.getInstance().upsertPlaylistOnlyMedia(url, title, artist, thumbnail, List.of());
         ClientMediaRepository.getInstance().enqueue(entry.id);
         selectedQueueIndex = Math.max(0, ClientMediaRepository.getInstance().getQueueEntries().size() - 1);
-        resolveMetadataAndApply(url, title, artist, thumbnail, false);
+        resolveMetadataAndApply(url, title, artist, thumbnail, false, true);
     }
 
     private void resolveSourceMetadata() {
@@ -1274,13 +1274,25 @@ public class RadioScreen extends Screen {
                 ? MediaMetadataResolver.bestThumbnail(selected.thumbnail(), selected.identifier())
                 : thumbnailOverride;
 
-        SharedMediaSnapshot.MediaEntry entry = ClientMediaRepository.getInstance().upsertMedia(
-                selected.identifier(),
-                finalTitle,
-                finalArtist,
-                finalThumbnail,
-                List.of()
-        );
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        SharedMediaSnapshot.MediaEntry entry;
+        if (action == SourceAction.QUEUE) {
+            entry = repository.upsertPlaylistOnlyMedia(
+                    selected.identifier(),
+                    finalTitle,
+                    finalArtist,
+                    finalThumbnail,
+                    List.of()
+            );
+        } else {
+            entry = repository.upsertMedia(
+                    selected.identifier(),
+                    finalTitle,
+                    finalArtist,
+                    finalThumbnail,
+                    List.of()
+            );
+        }
 
         switch (action) {
             case PLAY -> {
@@ -1653,7 +1665,7 @@ public class RadioScreen extends Screen {
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
         String playlistId = repository.createPlaylist(name, SharedMediaSnapshot.PlaylistAccess.PRIVATE);
         for (LavaPlayerAccess.SearchResult track : importYoutubeTracks) {
-            SharedMediaSnapshot.MediaEntry entry = repository.upsertMedia(
+            SharedMediaSnapshot.MediaEntry entry = repository.upsertPlaylistOnlyMedia(
                     track.identifier(),
                     track.title(),
                     track.artist(),
@@ -1836,7 +1848,7 @@ public class RadioScreen extends Screen {
         } else {
             ClientAudioEngine.getInstance().playHandheld(entry.url, 0L, hand, entry.title, entry.artist, entry.thumbnail);
         }
-        resolveMetadataAndApply(entry.url, entry.title, entry.artist, entry.thumbnail, false);
+        resolveMetadataAndApply(entry.url, entry.title, entry.artist, entry.thumbnail, false, entry.hiddenFromLibrary);
         persistRuntimeState();
     }
 
@@ -1860,6 +1872,10 @@ public class RadioScreen extends Screen {
     }
 
     private void resolveMetadataAndApply(String url, String title, String artist, String thumbnail, boolean updateCurrentPlayback) {
+        resolveMetadataAndApply(url, title, artist, thumbnail, updateCurrentPlayback, false);
+    }
+
+    private void resolveMetadataAndApply(String url, String title, String artist, String thumbnail, boolean updateCurrentPlayback, boolean preferPlaylistOnly) {
         MediaMetadataResolver.resolve(url, title, artist, thumbnail).thenAccept(resolved -> {
             if (minecraft == null) {
                 return;
@@ -1867,7 +1883,14 @@ public class RadioScreen extends Screen {
             minecraft.execute(() -> {
                 String finalUrl = resolved.url().isBlank() ? url : resolved.url();
                 if (!finalUrl.isBlank()) {
-                    ClientMediaRepository.getInstance().upsertMedia(finalUrl, resolved.title(), resolved.artist(), resolved.thumbnail(), List.of());
+                    ClientMediaRepository repository = ClientMediaRepository.getInstance();
+                    SharedMediaSnapshot.MediaEntry existing = repository.findByUrl(finalUrl);
+                    boolean keepOutOfLibrary = preferPlaylistOnly || (existing != null && existing.hiddenFromLibrary);
+                    if (keepOutOfLibrary) {
+                        repository.upsertPlaylistOnlyMedia(finalUrl, resolved.title(), resolved.artist(), resolved.thumbnail(), List.of());
+                    } else {
+                        repository.upsertMedia(finalUrl, resolved.title(), resolved.artist(), resolved.thumbnail(), List.of());
+                    }
                 }
 
                 if (titleInput != null && !titleInput.isFocused() && titleInput.getValue().isBlank()) {

@@ -101,7 +101,7 @@ public class MediaRadioClient {
             SharedMediaSnapshot.MediaEntry existing = repository.findByUrl(resolvedUrl);
             String mediaId;
             if (existing == null) {
-                mediaId = repository.upsertMedia(resolvedUrl, resolvedTitle, resolvedArtist, resolvedThumbnail, List.of()).id;
+                mediaId = repository.upsertPlaylistOnlyMedia(resolvedUrl, resolvedTitle, resolvedArtist, resolvedThumbnail, List.of()).id;
             } else {
                 mediaId = existing.id;
             }

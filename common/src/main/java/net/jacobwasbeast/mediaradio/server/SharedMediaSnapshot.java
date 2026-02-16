@@ -48,7 +48,12 @@ public class SharedMediaSnapshot {
     }
 
     public MediaEntry upsertMedia(String url, String title, String artist, String thumbnail, List<String> tags) {
+        return upsertMedia(url, title, artist, thumbnail, tags, false);
+    }
+
+    public MediaEntry upsertMedia(String url, String title, String artist, String thumbnail, List<String> tags, boolean hiddenFromLibrary) {
         String id = idForUrl(url);
+        boolean existed = library.containsKey(id);
         MediaEntry entry = library.computeIfAbsent(id, ignored -> new MediaEntry());
         entry.id = id;
         entry.url = safe(url);
@@ -56,6 +61,15 @@ public class SharedMediaSnapshot {
         entry.artist = safe(artist);
         entry.thumbnail = safe(thumbnail);
         entry.tags = tags == null ? new ArrayList<>() : new ArrayList<>(tags);
+        // `hiddenFromLibrary` means playlist-only entry.
+        // Never hide an already-visible entry when importing playlists.
+        if (hiddenFromLibrary) {
+            if (!existed) {
+                entry.hiddenFromLibrary = true;
+            }
+        } else {
+            entry.hiddenFromLibrary = false;
+        }
         entry.sanitize();
         return entry;
     }
@@ -109,6 +123,7 @@ public class SharedMediaSnapshot {
         public String artist = "";
         public String thumbnail = "";
         public List<String> tags = new ArrayList<>();
+        public boolean hiddenFromLibrary = false;
 
         public void sanitize() {
             id = safe(id);

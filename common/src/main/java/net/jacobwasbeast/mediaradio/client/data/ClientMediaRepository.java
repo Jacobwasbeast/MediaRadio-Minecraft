@@ -67,6 +67,7 @@ public class ClientMediaRepository {
 
     public synchronized List<SharedMediaSnapshot.MediaEntry> getSortedLibrary() {
         return snapshot.library.values().stream()
+                .filter(entry -> entry != null && !entry.hiddenFromLibrary)
                 .sorted(Comparator.comparing(entry -> entry.title == null || entry.title.isBlank() ? entry.url : entry.title, String.CASE_INSENSITIVE_ORDER))
                 .toList();
     }
@@ -97,7 +98,13 @@ public class ClientMediaRepository {
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry upsertMedia(String url, String title, String artist, String thumbnail, List<String> tags) {
-        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(url, title, artist, thumbnail, tags);
+        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(url, title, artist, thumbnail, tags, false);
+        persistAndUpload();
+        return mediaEntry;
+    }
+
+    public synchronized SharedMediaSnapshot.MediaEntry upsertPlaylistOnlyMedia(String url, String title, String artist, String thumbnail, List<String> tags) {
+        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(url, title, artist, thumbnail, tags, true);
         persistAndUpload();
         return mediaEntry;
     }
@@ -542,7 +549,8 @@ public class ClientMediaRepository {
                         queued.title == null ? "" : queued.title,
                         queued.artist == null ? "" : queued.artist,
                         queued.thumbnail == null ? "" : queued.thumbnail,
-                        List.of()
+                        List.of(),
+                        true
                 );
                 queueState.queueItems.add(new QueueItem(
                         safeQueueItemId(queued.queueItemId),
