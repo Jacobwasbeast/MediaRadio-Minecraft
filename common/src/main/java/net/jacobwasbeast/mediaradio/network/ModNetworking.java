@@ -4,8 +4,11 @@ import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.BalmEnvironment;
 import net.blay09.mods.balm.api.network.BalmNetworking;
 import net.jacobwasbeast.mediaradio.MediaRadio;
+import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundSharedMediaMessage;
 import net.jacobwasbeast.mediaradio.server.SharedMediaManager;
 import net.minecraft.server.MinecraftServer;
@@ -36,6 +39,47 @@ public class ModNetworking {
                 }
         );
 
+        networking.registerClientboundPacket(
+                MediaRadio.id("radio_state"),
+                ClientboundRadioStateMessage.class,
+                ClientboundRadioStateMessage::encode,
+                ClientboundRadioStateMessage::new,
+                (player, message) -> {
+                    if (Balm.getEnvironment() != BalmEnvironment.CLIENT) {
+                        return;
+                    }
+                    try {
+                        Class<?> clientClass = Class.forName("net.jacobwasbeast.mediaradio.client.MediaRadioClient");
+                        clientClass.getMethod(
+                                        "applyServerRadioRuntimeState",
+                                        String.class,
+                                        String.class,
+                                        String.class,
+                                        String.class,
+                                        String.class,
+                                        String.class,
+                                        float.class,
+                                        long.class,
+                                        boolean.class
+                                )
+                                .invoke(
+                                        null,
+                                        message.radioId(),
+                                        message.url(),
+                                        message.title(),
+                                        message.artist(),
+                                        message.thumbnail(),
+                                        message.queueStateJson(),
+                                        message.volume(),
+                                        message.positionMs(),
+                                        message.playing()
+                                );
+                    } catch (Exception exception) {
+                        LOGGER.error("Failed to apply radio runtime state on client", exception);
+                    }
+                }
+        );
+
         networking.registerServerboundPacket(
                 MediaRadio.id("shared_media_upload"),
                 ServerboundSharedMediaMessage.class,
@@ -50,6 +94,22 @@ public class ModNetworking {
                 ServerboundRadioControlMessage::encode,
                 ServerboundRadioControlMessage::new,
                 SharedMediaManager::handleRadioControl
+        );
+
+        networking.registerServerboundPacket(
+                MediaRadio.id("handheld_state"),
+                ServerboundHandheldStateMessage.class,
+                ServerboundHandheldStateMessage::encode,
+                ServerboundHandheldStateMessage::new,
+                SharedMediaManager::handleHandheldState
+        );
+
+        networking.registerServerboundPacket(
+                MediaRadio.id("radio_state_request"),
+                ServerboundRequestRadioStateMessage.class,
+                ServerboundRequestRadioStateMessage::encode,
+                ServerboundRequestRadioStateMessage::new,
+                SharedMediaManager::handleRadioStateRequest
         );
     }
 
@@ -67,5 +127,17 @@ public class ModNetworking {
 
     public static void sendBlockRadioControl(ServerboundRadioControlMessage message) {
         Balm.getNetworking().sendToServer(message);
+    }
+
+    public static void sendHandheldState(ServerboundHandheldStateMessage message) {
+        Balm.getNetworking().sendToServer(message);
+    }
+
+    public static void requestRadioState(String radioId) {
+        Balm.getNetworking().sendToServer(new ServerboundRequestRadioStateMessage(radioId));
+    }
+
+    public static void sendRadioState(ServerPlayer player, ClientboundRadioStateMessage message) {
+        Balm.getNetworking().sendTo(player, message);
     }
 }

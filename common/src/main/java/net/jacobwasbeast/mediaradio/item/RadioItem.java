@@ -24,6 +24,7 @@ import net.jacobwasbeast.mediaradio.block.RadioBlock;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.client.MediaRadioClient;
 import net.jacobwasbeast.mediaradio.registry.ModBlocks;
+import net.jacobwasbeast.mediaradio.server.SharedMediaManager;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
@@ -39,6 +40,7 @@ public class RadioItem extends Item {
     private static final String TAG_THUMBNAIL = "RadioThumbnail";
     private static final String TAG_POSITION = "RadioPosition";
     private static final String TAG_VOLUME = "RadioVolume";
+    public static final String TAG_QUEUE_STATE = "RadioQueueState";
 
     public RadioItem(Properties properties) {
         super(properties);
@@ -126,8 +128,11 @@ public class RadioItem extends Item {
 
         String title = getString(stack, TAG_TITLE);
         String artist = getString(stack, TAG_ARTIST);
+        String url = getString(stack, TAG_URL);
         if (!title.isBlank()) {
             tooltipComponents.add(Component.literal("Saved: " + title).withStyle(ChatFormatting.GRAY));
+        } else if (!url.isBlank()) {
+            tooltipComponents.add(Component.literal("Saved: " + url).withStyle(ChatFormatting.GRAY));
         }
         if (!artist.isBlank()) {
             tooltipComponents.add(Component.literal("By: " + artist).withStyle(ChatFormatting.DARK_GRAY));
@@ -146,29 +151,18 @@ public class RadioItem extends Item {
             radioBlockEntity.setRadioId(radioId);
         }
         tag.putString(TAG_RADIO_ID, radioId);
-        tag.putString(TAG_URL, radioBlockEntity.getMediaUrl());
-        tag.putString(TAG_TITLE, radioBlockEntity.getMediaTitle());
-        tag.putString(TAG_ARTIST, radioBlockEntity.getMediaArtist());
-        tag.putString(TAG_THUMBNAIL, radioBlockEntity.getMediaThumbnail());
-        tag.putLong(TAG_POSITION, radioBlockEntity.getPlaybackPositionMs());
-        tag.putFloat(TAG_VOLUME, radioBlockEntity.getVolume());
+        tag.remove(TAG_URL);
+        tag.remove(TAG_TITLE);
+        tag.remove(TAG_ARTIST);
+        tag.remove(TAG_THUMBNAIL);
+        tag.remove(TAG_POSITION);
+        tag.remove(TAG_VOLUME);
+        tag.remove(TAG_QUEUE_STATE);
     }
 
     public static void applyItemDataToBlockEntity(ItemStack stack, RadioBlockEntity radioBlockEntity) {
-        CompoundTag tag = stack.getTag();
-        if (tag == null) {
-            return;
-        }
         radioBlockEntity.setRadioId(getOrCreateRadioId(stack));
-        radioBlockEntity.setMedia(
-                getString(stack, TAG_URL),
-                getString(stack, TAG_TITLE),
-                getString(stack, TAG_ARTIST),
-                getString(stack, TAG_THUMBNAIL)
-        );
-        radioBlockEntity.setVolume(tag.contains(TAG_VOLUME) ? tag.getFloat(TAG_VOLUME) : 1.0f);
-        long position = Math.max(0L, tag.getLong(TAG_POSITION));
-        radioBlockEntity.setPausedPositionMs(position);
+        SharedMediaManager.applyRuntimeStateToBlockEntity(radioBlockEntity);
     }
 
     private static String getString(ItemStack stack, String key) {
@@ -209,6 +203,37 @@ public class RadioItem extends Item {
             return 1.0f;
         }
         return Math.max(0.0f, Math.min(2.0f, tag.getFloat(TAG_VOLUME)));
+    }
+
+    public static String getSavedQueueState(ItemStack stack) {
+        return getString(stack, TAG_QUEUE_STATE);
+    }
+
+    public static void saveRuntimeState(ItemStack stack, String url, String title, String artist, String thumbnail, long positionMs, float volume, String queueStateJson) {
+        CompoundTag tag = stack.getOrCreateTag();
+        String safeUrl = url == null ? "" : url;
+        if (!safeUrl.isBlank() || !tag.contains(TAG_URL)) {
+            tag.putString(TAG_URL, safeUrl);
+        }
+
+        String safeTitle = title == null ? "" : title;
+        if (!safeTitle.isBlank() || !tag.contains(TAG_TITLE)) {
+            tag.putString(TAG_TITLE, safeTitle);
+        }
+
+        String safeArtist = artist == null ? "" : artist;
+        if (!safeArtist.isBlank() || !tag.contains(TAG_ARTIST)) {
+            tag.putString(TAG_ARTIST, safeArtist);
+        }
+
+        String safeThumbnail = thumbnail == null ? "" : thumbnail;
+        if (!safeThumbnail.isBlank() || !tag.contains(TAG_THUMBNAIL)) {
+            tag.putString(TAG_THUMBNAIL, safeThumbnail);
+        }
+        tag.putLong(TAG_POSITION, Math.max(0L, positionMs));
+        tag.putFloat(TAG_VOLUME, Math.max(0.0f, Math.min(2.0f, volume)));
+        tag.putString(TAG_QUEUE_STATE, queueStateJson == null ? "" : queueStateJson);
+        getOrCreateRadioId(stack);
     }
 
     public static String getOrCreateRadioId(ItemStack stack) {

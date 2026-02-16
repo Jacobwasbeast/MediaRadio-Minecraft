@@ -4,11 +4,17 @@ import net.blay09.mods.balm.api.Balm;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
+import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.entity.BlockEntity;
+
+import java.util.UUID;
 
 public class SharedMediaManager {
 
@@ -50,24 +56,143 @@ public class SharedMediaManager {
             return;
         }
 
+        String radioId = radioBlockEntity.getRadioId();
+        if (radioId == null || radioId.isBlank()) {
+            radioId = UUID.randomUUID().toString();
+            radioBlockEntity.setRadioId(radioId);
+        }
+
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
+        RadioRuntimeStateSavedData.RadioRuntimeState runtimeState = runtimeData.getOrCreate(radioId);
+        long now = System.currentTimeMillis();
+
         switch (message.action()) {
             case PLAY_URL -> {
+                runtimeState.url = safe(message.url());
+                runtimeState.title = safe(message.title());
+                runtimeState.artist = safe(message.artist());
+                runtimeState.thumbnail = safe(message.thumbnail());
+                runtimeState.positionMs = 0L;
+                runtimeState.playing = true;
+                runtimeState.updatedAtMs = now;
+                runtimeState.volume = Mth.clamp(message.volume(), 0f, 2f);
                 radioBlockEntity.setMedia(message.url(), message.title(), message.artist(), message.thumbnail());
                 radioBlockEntity.play();
             }
-            case UPDATE_METADATA -> radioBlockEntity.updateMetadata(message.title(), message.artist(), message.thumbnail());
+            case UPDATE_METADATA -> {
+                runtimeState.title = safe(message.title());
+                runtimeState.artist = safe(message.artist());
+                runtimeState.thumbnail = safe(message.thumbnail());
+                runtimeState.updatedAtMs = now;
+                radioBlockEntity.updateMetadata(message.title(), message.artist(), message.thumbnail());
+            }
+            case UPDATE_QUEUE_STATE -> {
+                runtimeState.queueStateJson = safe(message.url());
+                runtimeState.updatedAtMs = now;
+                radioBlockEntity.setQueueStateJson(message.url());
+            }
             case TOGGLE_PAUSE -> {
-                if (radioBlockEntity.isPlaying()) {
+                if (runtimeState.playing) {
+                    runtimeState.positionMs = runtimeData.currentPositionMs(runtimeState);
+                    runtimeState.playing = false;
+                    runtimeState.updatedAtMs = now;
                     radioBlockEntity.pause();
                 } else {
+                    runtimeState.playing = true;
+                    runtimeState.updatedAtMs = now;
                     radioBlockEntity.play();
                 }
             }
-            case STOP -> radioBlockEntity.stop();
-            case SET_VOLUME -> radioBlockEntity.setVolume(message.volume());
-            case SEEK -> radioBlockEntity.seekTo(message.positionMs());
+            case STOP -> {
+                runtimeState.playing = false;
+                runtimeState.positionMs = 0L;
+                runtimeState.updatedAtMs = now;
+                radioBlockEntity.stop();
+            }
+            case SET_VOLUME -> {
+                runtimeState.volume = Mth.clamp(message.volume(), 0f, 2f);
+                runtimeState.updatedAtMs = now;
+                radioBlockEntity.setVolume(message.volume());
+            }
+            case SEEK -> {
+                runtimeState.positionMs = Math.max(0L, message.positionMs());
+                runtimeState.updatedAtMs = now;
+                radioBlockEntity.seekTo(message.positionMs());
+            }
         }
 
+        runtimeState.volume = Mth.clamp(radioBlockEntity.getVolume(), 0f, 2f);
+        runtimeState.queueStateJson = safe(radioBlockEntity.getQueueStateJson());
+        runtimeData.setDirty();
         MediaRadio.LOGGER.debug("Radio control {} at {} by {}", message.action(), blockPos, player.getGameProfile().getName());
+    }
+
+    public static void handleHandheldState(ServerPlayer player, ServerboundHandheldStateMessage message) {
+        String radioId = message.radioId();
+        if (radioId == null || radioId.isBlank()) {
+            return;
+        }
+
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
+        runtimeData.setFromClient(
+                radioId,
+                message.url(),
+                message.title(),
+                message.artist(),
+                message.thumbnail(),
+                message.queueStateJson(),
+                message.volume(),
+                message.positionMs(),
+                message.playing()
+        );
+    }
+
+    public static void handleRadioStateRequest(ServerPlayer player, ServerboundRequestRadioStateMessage message) {
+        String radioId = safe(message.radioId());
+        if (radioId.isBlank()) {
+            return;
+        }
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
+        RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
+        long position = runtimeData.currentPositionMs(state);
+        ModNetworking.sendRadioState(player, new ClientboundRadioStateMessage(
+                radioId,
+                safe(state.url),
+                safe(state.title),
+                safe(state.artist),
+                safe(state.thumbnail),
+                safe(state.queueStateJson),
+                Mth.clamp(state.volume, 0f, 2f),
+                position,
+                state.playing
+        ));
+    }
+
+    public static void applyRuntimeStateToBlockEntity(RadioBlockEntity radioBlockEntity) {
+        if (radioBlockEntity == null || radioBlockEntity.getLevel() == null || radioBlockEntity.getLevel().isClientSide) {
+            return;
+        }
+        String radioId = safe(radioBlockEntity.getRadioId());
+        if (radioId.isBlank()) {
+            return;
+        }
+        MinecraftServer server = radioBlockEntity.getLevel().getServer();
+        if (server == null) {
+            return;
+        }
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(server);
+        RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
+        long position = runtimeData.currentPositionMs(state);
+        radioBlockEntity.setMedia(state.url, state.title, state.artist, state.thumbnail);
+        radioBlockEntity.setQueueStateJson(state.queueStateJson);
+        radioBlockEntity.setVolume(state.volume);
+        radioBlockEntity.setPausedPositionMs(position);
+        if (state.playing && state.url != null && !state.url.isBlank()) {
+            radioBlockEntity.play();
+        }
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
     }
 }

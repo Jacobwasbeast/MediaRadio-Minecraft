@@ -7,6 +7,7 @@ import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
@@ -91,7 +92,10 @@ public class RadioScreen extends Screen {
     private String draftPlaylistName = "";
 
     private StyledButton pauseResumeButton;
+    private StyledButton loopModeButton;
     private boolean timelineDragging;
+    private String lastPersistedQueueState = "";
+    private String lastPersistedRuntimeKey = "";
 
     private RadioScreen(BlockPos blockPos, InteractionHand hand) {
         super(Component.literal("Media Radio"));
@@ -113,11 +117,15 @@ public class RadioScreen extends Screen {
         panelY = (height - PANEL_HEIGHT) / 2;
 
         ClientMediaRepository.getInstance().setActiveRadioId(resolveActiveRadioId());
+        if (!isBlockMode() && hand != null) {
+            ClientAudioEngine.getInstance().setHandheldContext(ClientMediaRepository.getInstance().getActiveRadioId(), hand);
+        }
 
         if (isBlockMode()) {
             RadioBlockEntity blockEntity = getBlockEntity();
             if (blockEntity != null) {
                 blockVolume = blockEntity.getVolume();
+                ClientMediaRepository.getInstance().importActiveQueueStateJson(blockEntity.getQueueStateJson());
             }
         }
 
@@ -197,11 +205,18 @@ public class RadioScreen extends Screen {
 
         clampSelections();
         updatePauseResumeButtonLabel();
+        persistRuntimeState();
     }
 
     @Override
     public boolean isPauseScreen() {
         return false;
+    }
+
+    @Override
+    public void onClose() {
+        persistRuntimeState();
+        super.onClose();
     }
 
     private void rebuildRadioWidgets() {
@@ -267,6 +282,12 @@ public class RadioScreen extends Screen {
         addRenderableWidget(new StyledButton(controlsX, row2Y, sideButtonW, 22, Component.literal("⏹"), this::stopPlayback, false, false));
         addRenderableWidget(new StyledButton(controlsX + sideButtonW + buttonGap, row2Y, centerButtonW, 22, Component.literal("🔉"), () -> adjustVolume(-0.1f), false, false));
         addRenderableWidget(new StyledButton(controlsX + sideButtonW + buttonGap + centerButtonW + buttonGap, row2Y, sideButtonW, 22, Component.literal("🔊"), () -> adjustVolume(0.1f), false, false));
+
+        int row3Y = row2Y + 30;
+        int halfW = (controlsW - buttonGap) / 2;
+        addRenderableWidget(new StyledButton(controlsX, row3Y, halfW, 22, Component.literal("🔀 Shuffle"), this::shuffleQueue, false, false));
+        loopModeButton = new StyledButton(controlsX + halfW + buttonGap, row3Y, controlsW - halfW - buttonGap, 22, Component.literal("🔁 Loop: All"), this::cycleLoopMode, false, false);
+        addRenderableWidget(loopModeButton);
 
         int rightX = nowRightPanelX();
         int rightW = nowRightPanelW();
@@ -403,7 +424,7 @@ public class RadioScreen extends Screen {
         int timerY = Math.max(y + 86, artistBottom + 4);
         guiGraphics.drawString(font, "Time: " + timer, textX, timerY, COLOR_ACCENT_ALT, false);
         drawTimelineBar(guiGraphics, playback, textX, timerY + 12, textW, 8);
-        guiGraphics.drawString(font, "Volume: " + String.format(Locale.ROOT, "%.0f%%", playback.volume() * 100f), x + 12, y + 182, COLOR_MUTED, false);
+        guiGraphics.drawString(font, "Volume: " + String.format(Locale.ROOT, "%.0f%%", playback.volume() * 100f), x + 12, y + 214, COLOR_MUTED, false);
 
         guiGraphics.drawString(font, "Queue", rightX + 8, y + 10, COLOR_ACCENT, false);
         List<SharedMediaSnapshot.MediaEntry> queueEntries = ClientMediaRepository.getInstance().getQueueEntries();
@@ -709,7 +730,8 @@ public class RadioScreen extends Screen {
         String artist = artistInput == null ? "" : artistInput.getValue().trim();
         String thumbnail = thumbnailInput == null ? "" : thumbnailInput.getValue().trim();
 
-        playMedia(url, title, artist, thumbnail);
+        SharedMediaSnapshot.MediaEntry entry = ClientMediaRepository.getInstance().upsertMedia(url, title, artist, thumbnail, List.of());
+        playEntry(entry, true);
         resolveMetadataAndApply(url, title, artist, thumbnail, true);
     }
 
@@ -764,7 +786,9 @@ public class RadioScreen extends Screen {
             ));
         } else {
             ClientAudioEngine.getInstance().stopHandheld();
+            ClientAudioEngine.getInstance().clearHandheldState();
         }
+        persistRuntimeState();
     }
 
     private void togglePause() {
@@ -783,6 +807,7 @@ public class RadioScreen extends Screen {
             ClientAudioEngine.getInstance().togglePauseHandheld();
         }
         updatePauseResumeButtonLabel();
+        updateLoopModeButtonLabel();
     }
 
     private void addInputToLibrary() {
@@ -803,7 +828,7 @@ public class RadioScreen extends Screen {
             return;
         }
 
-        playEntry(library.get(selectedLibraryIndex));
+        playEntry(library.get(selectedLibraryIndex), true);
     }
 
     private void enqueueSelectedLibrary() {
@@ -865,7 +890,7 @@ public class RadioScreen extends Screen {
         }
         ClientMediaRepository.getInstance().setQueueFromPlaylist(selectedPlaylistId);
         selectedQueueIndex = ClientMediaRepository.getInstance().getQueueIndex();
-        playEntry(tracks.get(0));
+        playEntry(tracks.get(0), false);
     }
 
     private void playSelectedPlaylistTrack() {
@@ -873,7 +898,7 @@ public class RadioScreen extends Screen {
         if (selectedPlaylistTrackIndex < 0 || selectedPlaylistTrackIndex >= tracks.size()) {
             return;
         }
-        playEntry(tracks.get(selectedPlaylistTrackIndex));
+        playEntry(tracks.get(selectedPlaylistTrackIndex), true);
     }
 
     private void queueSelectedPlaylistTrack() {
@@ -894,25 +919,27 @@ public class RadioScreen extends Screen {
     }
 
     private void playQueueNext() {
-        SharedMediaSnapshot.MediaEntry next = ClientMediaRepository.getInstance().nextQueueEntry();
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        SharedMediaSnapshot.MediaEntry next = repository.nextQueueEntry();
         if (next != null) {
-            selectedQueueIndex = ClientMediaRepository.getInstance().getQueueIndex();
-            playEntry(next);
+            selectedQueueIndex = repository.getQueueIndex();
+            playEntry(next, false);
         }
     }
 
     private void playQueuePrevious() {
-        SharedMediaSnapshot.MediaEntry previous = ClientMediaRepository.getInstance().previousQueueEntry();
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        SharedMediaSnapshot.MediaEntry previous = repository.previousQueueEntry();
         if (previous != null) {
-            selectedQueueIndex = ClientMediaRepository.getInstance().getQueueIndex();
-            playEntry(previous);
+            selectedQueueIndex = repository.getQueueIndex();
+            playEntry(previous, false);
         }
     }
 
     private void playSelectedQueue() {
         SharedMediaSnapshot.MediaEntry entry = ClientMediaRepository.getInstance().setQueueIndex(selectedQueueIndex);
         if (entry != null) {
-            playEntry(entry);
+            playEntry(entry, false);
         }
     }
 
@@ -942,9 +969,23 @@ public class RadioScreen extends Screen {
         selectedQueueIndex = target;
     }
 
-    private void playEntry(SharedMediaSnapshot.MediaEntry entry) {
+    private void shuffleQueue() {
+        ClientMediaRepository.getInstance().shuffleQueue();
+        selectedQueueIndex = ClientMediaRepository.getInstance().getQueueIndex();
+    }
+
+    private void cycleLoopMode() {
+        ClientMediaRepository.getInstance().cycleLoopMode();
+        updateLoopModeButtonLabel();
+        persistRuntimeState();
+    }
+
+    private void playEntry(SharedMediaSnapshot.MediaEntry entry, boolean syncQueueSelection) {
         if (entry == null || entry.url == null || entry.url.isBlank()) {
             return;
+        }
+        if (syncQueueSelection) {
+            ensureQueueCurrent(entry);
         }
         if (isBlockMode()) {
             ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
@@ -961,6 +1002,26 @@ public class RadioScreen extends Screen {
             ClientAudioEngine.getInstance().playHandheld(entry.url, 0L, hand, entry.title, entry.artist, entry.thumbnail);
         }
         resolveMetadataAndApply(entry.url, entry.title, entry.artist, entry.thumbnail, false);
+        persistRuntimeState();
+    }
+
+    private void ensureQueueCurrent(SharedMediaSnapshot.MediaEntry entry) {
+        if (entry == null || entry.id == null || entry.id.isBlank()) {
+            return;
+        }
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        List<SharedMediaSnapshot.MediaEntry> queue = repository.getQueueEntries();
+        if (selectedQueueIndex >= 0 && selectedQueueIndex < queue.size()) {
+            SharedMediaSnapshot.MediaEntry selectedEntry = queue.get(selectedQueueIndex);
+            if (selectedEntry != null && entry.id.equals(selectedEntry.id)) {
+                repository.setQueueIndex(selectedQueueIndex);
+                return;
+            }
+        }
+        repository.enqueue(entry.id);
+        int newIndex = Math.max(0, repository.getQueueEntries().size() - 1);
+        repository.setQueueIndex(newIndex);
+        selectedQueueIndex = newIndex;
     }
 
     private void resolveMetadataAndApply(String url, String title, String artist, String thumbnail, boolean updateCurrentPlayback) {
@@ -1098,6 +1159,7 @@ public class RadioScreen extends Screen {
         } else {
             ClientAudioEngine.getInstance().setHandheldVolume(newVolume);
         }
+        persistRuntimeState();
     }
 
     private void clampSelections() {
@@ -1240,6 +1302,19 @@ public class RadioScreen extends Screen {
         } else {
             pauseResumeButton.setMessage(Component.literal("⏸ Pause"));
         }
+    }
+
+    private void updateLoopModeButtonLabel() {
+        if (loopModeButton == null || tab != Tab.NOW) {
+            return;
+        }
+        ClientMediaRepository.LoopMode loopMode = ClientMediaRepository.getInstance().getLoopMode();
+        String label = switch (loopMode) {
+            case NONE -> "🔁 Loop: None";
+            case ONE -> "🔂 Loop: One";
+            case ALL -> "🔁 Loop: All";
+        };
+        loopModeButton.setMessage(Component.literal(label));
     }
 
     private void drawTimelineBar(GuiGraphics guiGraphics, PlaybackView playback, int x, int y, int width, int height) {
@@ -1404,6 +1479,69 @@ public class RadioScreen extends Screen {
             return null;
         }
         return radioBlockEntity;
+    }
+
+    private void persistRuntimeState() {
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String queueStateJson = repository.exportActiveQueueStateJson();
+        if (isBlockMode()) {
+            if (blockPos == null) {
+                return;
+            }
+            if (!queueStateJson.equals(lastPersistedQueueState)) {
+                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                        blockPos,
+                        ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                        queueStateJson,
+                        "",
+                        "",
+                        "",
+                        blockVolume,
+                        0L
+                ));
+                lastPersistedQueueState = queueStateJson;
+            }
+            return;
+        }
+
+        if (minecraft == null || minecraft.player == null || hand == null) {
+            return;
+        }
+        var stack = minecraft.player.getItemInHand(hand);
+        if (!stack.is(ModItems.RADIO_ITEM)) {
+            return;
+        }
+        PlaybackView playbackView = getPlaybackView();
+        String resolvedUrl = "";
+        ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+        SharedMediaSnapshot.MediaEntry current = repository.getCurrentQueueEntry();
+        if (current != null && current.url != null && !current.url.isBlank()) {
+            resolvedUrl = current.url;
+        } else if (!audioEngine.getHandheldUrl().isBlank()) {
+            resolvedUrl = audioEngine.getHandheldUrl();
+        } else if (!RadioItem.getSavedUrl(stack).isBlank()) {
+            resolvedUrl = RadioItem.getSavedUrl(stack);
+        } else if (playbackView.title() != null && playbackView.title().startsWith("http")) {
+            resolvedUrl = playbackView.title();
+        }
+        String key = resolvedUrl + "|" + playbackView.title() + "|" + playbackView.artist() + "|" + playbackView.thumbnail() + "|"
+                + playbackView.volume() + "|" + queueStateJson;
+        if (key.equals(lastPersistedRuntimeKey)) {
+            return;
+        }
+        String radioId = RadioItem.getOrCreateRadioId(stack);
+        ModNetworking.sendHandheldState(new ServerboundHandheldStateMessage(
+                radioId,
+                resolvedUrl,
+                playbackView.title(),
+                playbackView.artist(),
+                playbackView.thumbnail(),
+                queueStateJson,
+                playbackView.volume(),
+                playbackView.positionMs(),
+                ClientAudioEngine.getInstance().isHandheldPlaying()
+        ));
+        lastPersistedRuntimeKey = key;
     }
 
     private String trim(String value, int maxLength) {

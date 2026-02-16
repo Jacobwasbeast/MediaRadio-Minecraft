@@ -1,52 +1,45 @@
 package net.jacobwasbeast.mediaradio.network.message;
 
-import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 
-public record ServerboundRadioControlMessage(
-        BlockPos blockPos,
-        Action action,
+public record ServerboundHandheldStateMessage(
+        String radioId,
         String url,
         String title,
         String artist,
         String thumbnail,
+        String queueStateJson,
         float volume,
-        long positionMs
+        long positionMs,
+        boolean playing
 ) {
-    private static final int MAX_PACKET_STRING = 32767;
+    private static final int MAX_PACKET_STRING = 262144;
     private static final int MAX_TITLE_ARTIST = 4096;
+    private static final int MAX_RADIO_ID = 256;
 
-    public ServerboundRadioControlMessage(FriendlyByteBuf friendlyByteBuf) {
+    public ServerboundHandheldStateMessage(FriendlyByteBuf friendlyByteBuf) {
         this(
-                friendlyByteBuf.readBlockPos(),
-                friendlyByteBuf.readEnum(Action.class),
+                friendlyByteBuf.readUtf(MAX_RADIO_ID),
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readUtf(MAX_TITLE_ARTIST),
                 friendlyByteBuf.readUtf(MAX_TITLE_ARTIST),
+                friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readFloat(),
-                friendlyByteBuf.readLong()
+                friendlyByteBuf.readLong(),
+                friendlyByteBuf.readBoolean()
         );
     }
 
     public void encode(FriendlyByteBuf friendlyByteBuf) {
-        friendlyByteBuf.writeBlockPos(blockPos);
-        friendlyByteBuf.writeEnum(action);
+        friendlyByteBuf.writeUtf(radioId, MAX_RADIO_ID);
         friendlyByteBuf.writeUtf(url, MAX_PACKET_STRING);
         friendlyByteBuf.writeUtf(title, MAX_TITLE_ARTIST);
         friendlyByteBuf.writeUtf(artist, MAX_TITLE_ARTIST);
         friendlyByteBuf.writeUtf(thumbnail, MAX_PACKET_STRING);
+        friendlyByteBuf.writeUtf(queueStateJson, MAX_PACKET_STRING);
         friendlyByteBuf.writeFloat(volume);
         friendlyByteBuf.writeLong(positionMs);
-    }
-
-    public enum Action {
-        PLAY_URL,
-        UPDATE_METADATA,
-        UPDATE_QUEUE_STATE,
-        TOGGLE_PAUSE,
-        STOP,
-        SET_VOLUME,
-        SEEK
+        friendlyByteBuf.writeBoolean(playing);
     }
 }

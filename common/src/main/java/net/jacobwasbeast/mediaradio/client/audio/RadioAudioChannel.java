@@ -71,6 +71,7 @@ public class RadioAudioChannel {
     private boolean paused;
     private boolean stopping;
     private boolean decoderEnded;
+    private boolean endedNaturally;
 
     private String currentUrl = "";
     private String displayTitle = "";
@@ -123,7 +124,7 @@ public class RadioAudioChannel {
     }
 
     public void play(String url, long startPositionMs) {
-        stop();
+        stopInternal(false);
         currentUrl = url == null ? "" : url;
         desiredStartPositionMs = Math.max(0L, startPositionMs);
         pausedPositionMs = -1L;
@@ -131,6 +132,7 @@ public class RadioAudioChannel {
         paused = false;
         stopping = false;
         decoderEnded = false;
+        endedNaturally = false;
         pcmQueue.clear();
         queuedBuffers.clear();
         launchDecoder(currentUrl, desiredStartPositionMs);
@@ -169,6 +171,18 @@ public class RadioAudioChannel {
     }
 
     public void stop() {
+        stopInternal(false);
+    }
+
+    public boolean consumeNaturalEnd() {
+        if (!endedNaturally) {
+            return false;
+        }
+        endedNaturally = false;
+        return true;
+    }
+
+    private void stopInternal(boolean naturalEnd) {
         stopping = true;
         if (decodeTask != null) {
             decodeTask.cancel(true);
@@ -194,6 +208,7 @@ public class RadioAudioChannel {
         lastStartMillis = 0L;
         pausedPositionMs = -1L;
         trackDurationMs = -1L;
+        endedNaturally = naturalEnd;
     }
 
     public void tick() {
@@ -223,7 +238,7 @@ public class RadioAudioChannel {
         }
 
         if (decoderEnded && pcmQueue.isEmpty() && queuedBuffers.isEmpty()) {
-            stop();
+            stopInternal(true);
         }
     }
 

@@ -20,6 +20,7 @@ public class RadioBlockEntity extends BlockEntity {
     public static final String TAG_STARTED_AT = "StartedAtEpochMs";
     public static final String TAG_PAUSED_POSITION = "PausedPositionMs";
     public static final String TAG_VOLUME = "Volume";
+    public static final String TAG_QUEUE_STATE = "QueueStateJson";
 
     private String mediaUrl = "";
     private String radioId = "";
@@ -30,6 +31,7 @@ public class RadioBlockEntity extends BlockEntity {
     private long startedAtEpochMs;
     private long pausedPositionMs;
     private float volume = 1.0f;
+    private String queueStateJson = "";
 
     public RadioBlockEntity(BlockPos blockPos, BlockState blockState) {
         super(ModBlockEntities.RADIO_BLOCK_ENTITY.get(), blockPos, blockState);
@@ -106,6 +108,15 @@ public class RadioBlockEntity extends BlockEntity {
         sync();
     }
 
+    public String getQueueStateJson() {
+        return queueStateJson == null ? "" : queueStateJson;
+    }
+
+    public void setQueueStateJson(String queueStateJson) {
+        this.queueStateJson = safe(queueStateJson);
+        sync();
+    }
+
     public void play() {
         this.startedAtEpochMs = System.currentTimeMillis() - Math.max(0L, pausedPositionMs);
         this.playing = true;
@@ -158,6 +169,7 @@ public class RadioBlockEntity extends BlockEntity {
         tag.putLong(TAG_STARTED_AT, startedAtEpochMs);
         tag.putLong(TAG_PAUSED_POSITION, pausedPositionMs);
         tag.putFloat(TAG_VOLUME, volume);
+        tag.putString(TAG_QUEUE_STATE, safe(queueStateJson));
     }
 
     @Override
@@ -172,6 +184,7 @@ public class RadioBlockEntity extends BlockEntity {
         startedAtEpochMs = tag.getLong(TAG_STARTED_AT);
         pausedPositionMs = tag.getLong(TAG_PAUSED_POSITION);
         volume = clamp(tag.getFloat(TAG_VOLUME), 0.0f, 2.0f);
+        queueStateJson = safe(tag.getString(TAG_QUEUE_STATE));
     }
 
     @Override

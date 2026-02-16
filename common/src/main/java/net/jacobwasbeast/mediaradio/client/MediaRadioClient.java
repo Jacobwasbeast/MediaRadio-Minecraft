@@ -15,10 +15,13 @@ import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.render.RadioBlockEntityRenderer;
 import net.jacobwasbeast.mediaradio.client.screen.RadioScreen;
+import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.mixin.ItemPropertiesAccessor;
 import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
+import net.jacobwasbeast.mediaradio.network.ModNetworking;
+import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
 
 import java.util.List;
 
@@ -54,31 +57,8 @@ public class MediaRadioClient {
                 String radioId = RadioItem.getOrCreateRadioId(stack);
                 ClientMediaRepository repository = ClientMediaRepository.getInstance();
                 repository.setActiveRadioId(radioId);
-
-                String url = RadioItem.getSavedUrl(stack);
-                String title = RadioItem.getSavedTitle(stack);
-                String artist = RadioItem.getSavedArtist(stack);
-                String thumbnail = RadioItem.getSavedThumbnail(stack);
-                long position = RadioItem.getSavedPositionMs(stack);
-                float volume = RadioItem.getSavedVolume(stack);
-
-                if (!url.isBlank()) {
-                    String resolvedTitle = title.isBlank() ? url : title;
-                    var existing = repository.findByUrl(url);
-                    String mediaId;
-                    if (existing == null) {
-                        mediaId = repository.upsertMedia(url, resolvedTitle, artist, thumbnail, List.of()).id;
-                    } else {
-                        mediaId = existing.id;
-                    }
-
-                    if (repository.getQueueEntries().isEmpty()) {
-                        repository.enqueue(mediaId);
-                        repository.setQueueIndex(0);
-                    }
-
-                    ClientAudioEngine.getInstance().primeHandheldState(resolvedTitle, artist, thumbnail, position, volume);
-                }
+                ClientAudioEngine.getInstance().setHandheldContext(radioId, hand);
+                ModNetworking.requestRadioState(radioId);
             }
         }
         minecraft.setScreen(RadioScreen.forHand(hand));
@@ -86,6 +66,79 @@ public class MediaRadioClient {
 
     public static void openBlockRadioScreen(BlockPos blockPos) {
         Minecraft.getInstance().setScreen(RadioScreen.forBlock(blockPos));
+    }
+
+    public static void applyServerRadioRuntimeState(
+            String radioId,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            String queueStateJson,
+            float volume,
+            long positionMs,
+            boolean playing
+    ) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.player == null) {
+            return;
+        }
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        if (radioId == null || radioId.isBlank() || !radioId.equals(repository.getActiveRadioId())) {
+            return;
+        }
+
+        boolean hasAuthoritativeQueueState = queueStateJson != null && !queueStateJson.isBlank();
+        if (queueStateJson != null && !queueStateJson.isBlank()) {
+            repository.importActiveQueueStateJson(queueStateJson);
+        }
+
+        String resolvedUrl = url == null ? "" : url;
+        String resolvedTitle = (title == null || title.isBlank()) ? resolvedUrl : title;
+        String resolvedArtist = artist == null ? "" : artist;
+        String resolvedThumbnail = thumbnail == null ? "" : thumbnail;
+        if (!resolvedUrl.isBlank()) {
+            SharedMediaSnapshot.MediaEntry existing = repository.findByUrl(resolvedUrl);
+            String mediaId;
+            if (existing == null) {
+                mediaId = repository.upsertMedia(resolvedUrl, resolvedTitle, resolvedArtist, resolvedThumbnail, List.of()).id;
+            } else {
+                mediaId = existing.id;
+            }
+
+            List<SharedMediaSnapshot.MediaEntry> queue = repository.getQueueEntries();
+            if (queue.isEmpty()) {
+                repository.enqueue(mediaId);
+                repository.setQueueIndex(0);
+            } else if (!hasAuthoritativeQueueState) {
+                int matchingIndex = -1;
+                for (int i = 0; i < queue.size(); i++) {
+                    SharedMediaSnapshot.MediaEntry queued = queue.get(i);
+                    if (queued != null && resolvedUrl.equals(queued.url)) {
+                        matchingIndex = i;
+                        break;
+                    }
+                }
+                if (matchingIndex >= 0) {
+                    repository.setQueueIndex(matchingIndex);
+                } else {
+                    repository.enqueue(mediaId);
+                    repository.setQueueIndex(Math.max(0, repository.getQueueEntries().size() - 1));
+                }
+            } else if (repository.getCurrentQueueEntry() == null) {
+                repository.setQueueIndex(0);
+            }
+        }
+
+        ClientAudioEngine.getInstance().primeHandheldState(
+                resolvedUrl,
+                resolvedTitle,
+                resolvedArtist,
+                MediaMetadataResolver.bestThumbnail(resolvedThumbnail, resolvedUrl),
+                positionMs,
+                volume,
+                playing
+        );
     }
 
     private static void registerItemPredicates() {

@@ -11,11 +11,16 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class ClientMediaRepository {
 
@@ -40,10 +45,10 @@ public class ClientMediaRepository {
     }
 
     public synchronized void setActiveRadioId(String radioId) {
-        String safe = radioId == null || radioId.isBlank() ? DEFAULT_RADIO_ID : radioId;
-        activeRadioId = safe;
-        queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
-        sanitizeQueue(activeQueueState());
+        activeRadioId = safeRadioId(radioId);
+        QueueState queueState = queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+        sanitizeQueue(queueState);
+        saveCache();
     }
 
     public synchronized String getActiveRadioId() {
@@ -105,7 +110,7 @@ public class ClientMediaRepository {
         snapshot.library.remove(mediaId);
         snapshot.playlists.values().forEach(playlist -> playlist.mediaIds.removeIf(mediaId::equals));
         for (QueueState queueState : queuesByRadioId.values()) {
-            queueState.queueMediaIds.removeIf(mediaId::equals);
+            queueState.queueItems.removeIf(item -> mediaId.equals(item.mediaId));
             sanitizeQueue(queueState);
         }
         persistAndUpload();
@@ -145,13 +150,21 @@ public class ClientMediaRepository {
     public synchronized void setQueueFromPlaylist(String playlistId) {
         QueueState queueState = activeQueueState();
         SharedMediaSnapshot.PlaylistEntry playlistEntry = snapshot.playlists.get(playlistId);
-        queueState.queueMediaIds.clear();
-        queueState.queueIndex = -1;
+        clearQueueState(queueState);
         if (playlistEntry == null || playlistEntry.mediaIds == null || playlistEntry.mediaIds.isEmpty()) {
+            saveCache();
             return;
         }
-        queueState.queueMediaIds.addAll(playlistEntry.mediaIds.stream().filter(snapshot.library::containsKey).toList());
-        queueState.queueIndex = queueState.queueMediaIds.isEmpty() ? -1 : 0;
+
+        for (String mediaId : playlistEntry.mediaIds) {
+            if (snapshot.library.containsKey(mediaId)) {
+                queueState.queueItems.add(new QueueItem(newQueueItemId(), mediaId));
+            }
+        }
+        if (!queueState.queueItems.isEmpty()) {
+            queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
+        }
+        saveCache();
     }
 
     public synchronized void enqueue(String mediaId) {
@@ -159,25 +172,29 @@ public class ClientMediaRepository {
         if (!snapshot.library.containsKey(mediaId)) {
             return;
         }
-        queueState.queueMediaIds.add(mediaId);
-        if (queueState.queueIndex < 0) {
-            queueState.queueIndex = 0;
+
+        QueueItem queueItem = new QueueItem(newQueueItemId(), mediaId);
+        queueState.queueItems.add(queueItem);
+        if (queueState.currentQueueItemId.isBlank()) {
+            queueState.currentQueueItemId = queueItem.queueItemId;
         }
+        saveCache();
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry getCurrentQueueEntry() {
         QueueState queueState = activeQueueState();
-        if (queueState.queueIndex < 0 || queueState.queueIndex >= queueState.queueMediaIds.size()) {
+        int currentIndex = findCurrentQueueIndex(queueState);
+        if (currentIndex < 0) {
             return null;
         }
-        return snapshot.library.get(queueState.queueMediaIds.get(queueState.queueIndex));
+        return queueEntryAt(queueState, currentIndex);
     }
 
     public synchronized List<SharedMediaSnapshot.MediaEntry> getQueueEntries() {
         QueueState queueState = activeQueueState();
         List<SharedMediaSnapshot.MediaEntry> entries = new ArrayList<>();
-        for (String mediaId : queueState.queueMediaIds) {
-            SharedMediaSnapshot.MediaEntry entry = snapshot.library.get(mediaId);
+        for (QueueItem queueItem : queueState.queueItems) {
+            SharedMediaSnapshot.MediaEntry entry = snapshot.library.get(queueItem.mediaId);
             if (entry != null) {
                 entries.add(entry);
             }
@@ -186,83 +203,233 @@ public class ClientMediaRepository {
     }
 
     public synchronized int getQueueIndex() {
-        return activeQueueState().queueIndex;
+        return findCurrentQueueIndex(activeQueueState());
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry setQueueIndex(int index) {
         QueueState queueState = activeQueueState();
-        if (index < 0 || index >= queueState.queueMediaIds.size()) {
+        if (index < 0 || index >= queueState.queueItems.size()) {
             return null;
         }
-        queueState.queueIndex = index;
-        return getCurrentQueueEntry();
+
+        queueState.currentQueueItemId = queueState.queueItems.get(index).queueItemId;
+        saveCache();
+        return queueEntryAt(queueState, index);
     }
 
     public synchronized void removeQueueIndex(int index) {
         QueueState queueState = activeQueueState();
-        if (index < 0 || index >= queueState.queueMediaIds.size()) {
+        if (index < 0 || index >= queueState.queueItems.size()) {
             return;
         }
 
-        queueState.queueMediaIds.remove(index);
+        QueueItem removed = queueState.queueItems.remove(index);
+        if (removed.queueItemId.equals(queueState.currentQueueItemId)) {
+            if (queueState.queueItems.isEmpty()) {
+                queueState.currentQueueItemId = "";
+            } else {
+                int replacementIndex = Math.min(index, queueState.queueItems.size() - 1);
+                queueState.currentQueueItemId = queueState.queueItems.get(replacementIndex).queueItemId;
+            }
+        }
         sanitizeQueue(queueState);
+        saveCache();
     }
 
     public synchronized void moveQueueIndex(int fromIndex, int toIndex) {
         QueueState queueState = activeQueueState();
-        if (fromIndex < 0 || fromIndex >= queueState.queueMediaIds.size() || toIndex < 0 || toIndex >= queueState.queueMediaIds.size()) {
+        if (fromIndex < 0 || fromIndex >= queueState.queueItems.size() || toIndex < 0 || toIndex >= queueState.queueItems.size()) {
             return;
         }
         if (fromIndex == toIndex) {
             return;
         }
 
-        String mediaId = queueState.queueMediaIds.remove(fromIndex);
-        queueState.queueMediaIds.add(toIndex, mediaId);
-
-        if (queueState.queueIndex == fromIndex) {
-            queueState.queueIndex = toIndex;
-        } else if (fromIndex < queueState.queueIndex && toIndex >= queueState.queueIndex) {
-            queueState.queueIndex--;
-        } else if (fromIndex > queueState.queueIndex && toIndex <= queueState.queueIndex) {
-            queueState.queueIndex++;
-        }
+        QueueItem queueItem = queueState.queueItems.remove(fromIndex);
+        queueState.queueItems.add(toIndex, queueItem);
+        sanitizeQueue(queueState);
+        saveCache();
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry nextQueueEntry() {
         QueueState queueState = activeQueueState();
-        if (queueState.queueMediaIds.isEmpty()) {
+        if (queueState.queueItems.isEmpty()) {
             return null;
         }
-        queueState.queueIndex++;
-        if (queueState.queueIndex >= queueState.queueMediaIds.size()) {
-            queueState.queueIndex = 0;
+
+        int currentIndex = findCurrentQueueIndex(queueState);
+        if (currentIndex < 0) {
+            queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
+            saveCache();
+            return queueEntryAt(queueState, 0);
         }
-        return getCurrentQueueEntry();
+
+        if (queueState.loopMode == LoopMode.ONE) {
+            return queueEntryAt(queueState, currentIndex);
+        }
+
+        int nextIndex = currentIndex + 1;
+        if (nextIndex >= queueState.queueItems.size()) {
+            if (queueState.loopMode == LoopMode.ALL) {
+                queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
+                saveCache();
+                return queueEntryAt(queueState, 0);
+            }
+            return null;
+        }
+
+        queueState.currentQueueItemId = queueState.queueItems.get(nextIndex).queueItemId;
+        saveCache();
+        return queueEntryAt(queueState, nextIndex);
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry previousQueueEntry() {
         QueueState queueState = activeQueueState();
-        if (queueState.queueMediaIds.isEmpty()) {
+        if (queueState.queueItems.isEmpty()) {
             return null;
         }
-        queueState.queueIndex--;
-        if (queueState.queueIndex < 0) {
-            queueState.queueIndex = queueState.queueMediaIds.size() - 1;
+
+        int currentIndex = findCurrentQueueIndex(queueState);
+        if (currentIndex < 0) {
+            queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
+            saveCache();
+            return queueEntryAt(queueState, 0);
         }
-        return getCurrentQueueEntry();
+
+        if (queueState.loopMode == LoopMode.ONE) {
+            return queueEntryAt(queueState, currentIndex);
+        }
+
+        int previousIndex = currentIndex - 1;
+        if (previousIndex < 0) {
+            if (queueState.loopMode == LoopMode.ALL) {
+                int lastIndex = queueState.queueItems.size() - 1;
+                queueState.currentQueueItemId = queueState.queueItems.get(lastIndex).queueItemId;
+                saveCache();
+                return queueEntryAt(queueState, lastIndex);
+            }
+            return null;
+        }
+
+        queueState.currentQueueItemId = queueState.queueItems.get(previousIndex).queueItemId;
+        saveCache();
+        return queueEntryAt(queueState, previousIndex);
+    }
+
+    public synchronized void shuffleQueue() {
+        QueueState queueState = activeQueueState();
+        if (queueState.queueItems.size() <= 1) {
+            return;
+        }
+        Collections.shuffle(queueState.queueItems, ThreadLocalRandom.current());
+        sanitizeQueue(queueState);
+        saveCache();
+    }
+
+    public synchronized LoopMode getLoopMode() {
+        return activeQueueState().loopMode;
+    }
+
+    public synchronized LoopMode cycleLoopMode() {
+        QueueState queueState = activeQueueState();
+        queueState.loopMode = switch (queueState.loopMode) {
+            case NONE -> LoopMode.ONE;
+            case ONE -> LoopMode.ALL;
+            case ALL -> LoopMode.NONE;
+        };
+        saveCache();
+        return queueState.loopMode;
+    }
+
+    public synchronized String exportActiveQueueStateJson() {
+        QueueState queueState = activeQueueState();
+        QueueStatePayload payload = new QueueStatePayload();
+        payload.loopMode = queueState.loopMode;
+        payload.currentQueueItemId = queueState.currentQueueItemId;
+        payload.queueIndex = findCurrentQueueIndex(queueState);
+
+        for (QueueItem queueItem : queueState.queueItems) {
+            SharedMediaSnapshot.MediaEntry entry = snapshot.library.get(queueItem.mediaId);
+            if (entry == null) {
+                continue;
+            }
+
+            QueueMediaPayload mediaPayload = new QueueMediaPayload();
+            mediaPayload.queueItemId = queueItem.queueItemId;
+            mediaPayload.url = entry.url;
+            mediaPayload.title = entry.title;
+            mediaPayload.artist = entry.artist;
+            mediaPayload.thumbnail = entry.thumbnail;
+            payload.entries.add(mediaPayload);
+        }
+        return gson.toJson(payload);
+    }
+
+    public synchronized void importActiveQueueStateJson(String json) {
+        if (json == null || json.isBlank()) {
+            return;
+        }
+
+        QueueStatePayload payload;
+        try {
+            payload = gson.fromJson(json, QueueStatePayload.class);
+        } catch (Exception ignored) {
+            return;
+        }
+        if (payload == null) {
+            return;
+        }
+
+        QueueState queueState = activeQueueState();
+        clearQueueState(queueState);
+        if (payload.loopMode != null) {
+            queueState.loopMode = payload.loopMode;
+        }
+
+        if (payload.entries != null) {
+            for (QueueMediaPayload queued : payload.entries) {
+                if (queued == null || queued.url == null || queued.url.isBlank()) {
+                    continue;
+                }
+
+                SharedMediaSnapshot.MediaEntry entry = snapshot.upsertMedia(
+                        queued.url,
+                        queued.title == null ? "" : queued.title,
+                        queued.artist == null ? "" : queued.artist,
+                        queued.thumbnail == null ? "" : queued.thumbnail,
+                        List.of()
+                );
+                queueState.queueItems.add(new QueueItem(
+                        safeQueueItemId(queued.queueItemId),
+                        entry.id
+                ));
+            }
+        }
+
+        if (!queueState.queueItems.isEmpty()) {
+            if (payload.currentQueueItemId != null && !payload.currentQueueItemId.isBlank() && containsQueueItemId(queueState, payload.currentQueueItemId)) {
+                queueState.currentQueueItemId = payload.currentQueueItemId;
+            } else if (payload.queueIndex >= 0 && payload.queueIndex < queueState.queueItems.size()) {
+                queueState.currentQueueItemId = queueState.queueItems.get(payload.queueIndex).queueItemId;
+            } else {
+                queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
+            }
+        }
+
+        sanitizeQueue(queueState);
+        saveCache();
     }
 
     public synchronized void uploadSnapshotNow() {
         ModNetworking.uploadSharedSnapshot(snapshot.toJson());
     }
 
-    private synchronized void applySnapshotJson(String json, boolean saveCache) {
+    private synchronized void applySnapshotJson(String json, boolean shouldSaveCache) {
         snapshot = SharedMediaSnapshot.fromJson(json);
         for (QueueState queueState : queuesByRadioId.values()) {
             sanitizeQueue(queueState);
         }
-        if (saveCache) {
+        if (shouldSaveCache) {
             saveCache();
         }
     }
@@ -297,18 +464,16 @@ public class ClientMediaRepository {
                     snapshot = SharedMediaSnapshot.fromJson(cacheModel.snapshotJson);
                 }
 
-                activeRadioId = cacheModel.activeRadioId == null || cacheModel.activeRadioId.isBlank() ? DEFAULT_RADIO_ID : cacheModel.activeRadioId;
+                activeRadioId = safeRadioId(cacheModel.activeRadioId);
                 queuesByRadioId.clear();
+
                 if (cacheModel.queuesByRadioId != null) {
                     for (Map.Entry<String, QueueStateModel> entry : cacheModel.queuesByRadioId.entrySet()) {
-                        QueueStateModel model = entry.getValue();
+                        String radioId = safeRadioId(entry.getKey());
                         QueueState queueState = new QueueState();
-                        if (model != null && model.queueMediaIds != null) {
-                            queueState.queueMediaIds.addAll(model.queueMediaIds);
-                        }
-                        queueState.queueIndex = model == null ? -1 : model.queueIndex;
+                        populateQueueStateFromModel(queueState, entry.getValue());
                         sanitizeQueue(queueState);
-                        queuesByRadioId.put(entry.getKey(), queueState);
+                        queuesByRadioId.put(radioId, queueState);
                     }
                 }
 
@@ -321,19 +486,34 @@ public class ClientMediaRepository {
                     if (active != null && active.snapshotJson != null) {
                         snapshot = SharedMediaSnapshot.fromJson(active.snapshotJson);
                     }
+
                     for (Map.Entry<String, RadioStateModel> entry : cacheModel.radios.entrySet()) {
-                        QueueState queueState = new QueueState();
+                        String radioId = safeRadioId(entry.getKey());
                         RadioStateModel model = entry.getValue();
+                        QueueState queueState = new QueueState();
                         if (model != null && model.queueMediaIds != null) {
-                            queueState.queueMediaIds.addAll(model.queueMediaIds);
+                            for (String mediaId : model.queueMediaIds) {
+                                if (mediaId != null && !mediaId.isBlank()) {
+                                    queueState.queueItems.add(new QueueItem(newQueueItemId(), mediaId));
+                                }
+                            }
                         }
-                        queueState.queueIndex = model == null ? -1 : model.queueIndex;
+                        if (model != null && model.loopMode != null) {
+                            queueState.loopMode = model.loopMode;
+                        }
+                        if (!queueState.queueItems.isEmpty()) {
+                            int index = model == null ? -1 : model.queueIndex;
+                            if (index >= 0 && index < queueState.queueItems.size()) {
+                                queueState.currentQueueItemId = queueState.queueItems.get(index).queueItemId;
+                            }
+                        }
                         sanitizeQueue(queueState);
-                        queuesByRadioId.put(entry.getKey(), queueState);
+                        queuesByRadioId.put(radioId, queueState);
                     }
                 }
 
-                queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+                QueueState activeQueue = queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+                sanitizeQueue(activeQueue);
                 return;
             }
         } catch (JsonSyntaxException ignored) {
@@ -354,13 +534,26 @@ public class ClientMediaRepository {
             model.activeRadioId = activeRadioId;
             model.snapshotJson = snapshot.toJson();
             model.queuesByRadioId = new HashMap<>();
+
             for (Map.Entry<String, QueueState> entry : queuesByRadioId.entrySet()) {
+                String radioId = safeRadioId(entry.getKey());
                 QueueState queueState = entry.getValue();
                 QueueStateModel queueModel = new QueueStateModel();
-                queueModel.queueMediaIds = new ArrayList<>(queueState.queueMediaIds);
-                queueModel.queueIndex = queueState.queueIndex;
-                model.queuesByRadioId.put(entry.getKey(), queueModel);
+                queueModel.loopMode = queueState.loopMode;
+                queueModel.currentQueueItemId = queueState.currentQueueItemId;
+                queueModel.queueItems = new ArrayList<>();
+                queueModel.queueMediaIds = new ArrayList<>();
+                for (QueueItem queueItem : queueState.queueItems) {
+                    QueueItemModel queueItemModel = new QueueItemModel();
+                    queueItemModel.queueItemId = queueItem.queueItemId;
+                    queueItemModel.mediaId = queueItem.mediaId;
+                    queueModel.queueItems.add(queueItemModel);
+                    queueModel.queueMediaIds.add(queueItem.mediaId);
+                }
+                queueModel.queueIndex = findCurrentQueueIndex(queueState);
+                model.queuesByRadioId.put(radioId, queueModel);
             }
+
             Files.writeString(cacheFile, gson.toJson(model));
         } catch (IOException exception) {
             MediaRadio.LOGGER.warn("Failed to save client media cache", exception);
@@ -368,16 +561,110 @@ public class ClientMediaRepository {
     }
 
     private synchronized QueueState activeQueueState() {
-        return queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+        QueueState queueState = queuesByRadioId.computeIfAbsent(activeRadioId, ignored -> new QueueState());
+        sanitizeQueue(queueState);
+        return queueState;
     }
 
     private void sanitizeQueue(QueueState queueState) {
-        queueState.queueMediaIds.removeIf(mediaId -> !snapshot.library.containsKey(mediaId));
-        if (queueState.queueMediaIds.isEmpty()) {
-            queueState.queueIndex = -1;
-        } else if (queueState.queueIndex < 0 || queueState.queueIndex >= queueState.queueMediaIds.size()) {
-            queueState.queueIndex = 0;
+        Set<String> seenQueueItemIds = new HashSet<>();
+        queueState.queueItems.removeIf(item -> item == null || item.mediaId == null || item.mediaId.isBlank() || !snapshot.library.containsKey(item.mediaId));
+        for (QueueItem queueItem : queueState.queueItems) {
+            if (queueItem.queueItemId == null || queueItem.queueItemId.isBlank() || seenQueueItemIds.contains(queueItem.queueItemId)) {
+                queueItem.queueItemId = newQueueItemId();
+            }
+            seenQueueItemIds.add(queueItem.queueItemId);
         }
+
+        if (queueState.queueItems.isEmpty()) {
+            queueState.currentQueueItemId = "";
+        } else if (queueState.currentQueueItemId == null || queueState.currentQueueItemId.isBlank() || !containsQueueItemId(queueState, queueState.currentQueueItemId)) {
+            queueState.currentQueueItemId = queueState.queueItems.get(0).queueItemId;
+        }
+    }
+
+    private boolean containsQueueItemId(QueueState queueState, String queueItemId) {
+        for (QueueItem queueItem : queueState.queueItems) {
+            if (queueItemId.equals(queueItem.queueItemId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int findCurrentQueueIndex(QueueState queueState) {
+        if (queueState.queueItems.isEmpty()) {
+            return -1;
+        }
+        for (int i = 0; i < queueState.queueItems.size(); i++) {
+            if (queueState.queueItems.get(i).queueItemId.equals(queueState.currentQueueItemId)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private SharedMediaSnapshot.MediaEntry queueEntryAt(QueueState queueState, int index) {
+        if (index < 0 || index >= queueState.queueItems.size()) {
+            return null;
+        }
+        return snapshot.library.get(queueState.queueItems.get(index).mediaId);
+    }
+
+    private void clearQueueState(QueueState queueState) {
+        queueState.queueItems.clear();
+        queueState.currentQueueItemId = "";
+    }
+
+    private void populateQueueStateFromModel(QueueState queueState, QueueStateModel model) {
+        if (model == null) {
+            return;
+        }
+
+        if (model.queueItems != null && !model.queueItems.isEmpty()) {
+            for (QueueItemModel queueItemModel : model.queueItems) {
+                if (queueItemModel == null || queueItemModel.mediaId == null || queueItemModel.mediaId.isBlank()) {
+                    continue;
+                }
+                queueState.queueItems.add(new QueueItem(
+                        safeQueueItemId(queueItemModel.queueItemId),
+                        queueItemModel.mediaId
+                ));
+            }
+        } else if (model.queueMediaIds != null) {
+            for (String mediaId : model.queueMediaIds) {
+                if (mediaId != null && !mediaId.isBlank()) {
+                    queueState.queueItems.add(new QueueItem(newQueueItemId(), mediaId));
+                }
+            }
+        }
+
+        queueState.loopMode = model.loopMode == null ? LoopMode.ALL : model.loopMode;
+        if (!queueState.queueItems.isEmpty()) {
+            if (model.currentQueueItemId != null && !model.currentQueueItemId.isBlank()) {
+                queueState.currentQueueItemId = model.currentQueueItemId;
+            } else if (model.queueIndex >= 0 && model.queueIndex < queueState.queueItems.size()) {
+                queueState.currentQueueItemId = queueState.queueItems.get(model.queueIndex).queueItemId;
+            }
+        }
+    }
+
+    private String safeQueueItemId(String queueItemId) {
+        if (queueItemId == null || queueItemId.isBlank()) {
+            return newQueueItemId();
+        }
+        return queueItemId;
+    }
+
+    private String newQueueItemId() {
+        return UUID.randomUUID().toString();
+    }
+
+    private String safeRadioId(String radioId) {
+        if (radioId == null || radioId.isBlank()) {
+            return DEFAULT_RADIO_ID;
+        }
+        return radioId;
     }
 
     private Path getCacheFile() {
@@ -385,8 +672,19 @@ public class ClientMediaRepository {
     }
 
     private static class QueueState {
-        private final List<String> queueMediaIds = new ArrayList<>();
-        private int queueIndex = -1;
+        private final List<QueueItem> queueItems = new ArrayList<>();
+        private String currentQueueItemId = "";
+        private LoopMode loopMode = LoopMode.ALL;
+    }
+
+    private static class QueueItem {
+        private String queueItemId;
+        private final String mediaId;
+
+        private QueueItem(String queueItemId, String mediaId) {
+            this.queueItemId = queueItemId;
+            this.mediaId = mediaId;
+        }
     }
 
     private static class CacheModel {
@@ -398,13 +696,44 @@ public class ClientMediaRepository {
     }
 
     private static class QueueStateModel {
+        private List<QueueItemModel> queueItems;
+        private String currentQueueItemId;
+        // legacy
         private List<String> queueMediaIds;
-        private int queueIndex;
+        private int queueIndex = -1;
+        private LoopMode loopMode = LoopMode.ALL;
+    }
+
+    private static class QueueItemModel {
+        private String queueItemId;
+        private String mediaId;
     }
 
     private static class RadioStateModel {
         private String snapshotJson;
         private List<String> queueMediaIds;
         private int queueIndex;
+        private LoopMode loopMode = LoopMode.ALL;
+    }
+
+    private static class QueueStatePayload {
+        private List<QueueMediaPayload> entries = new ArrayList<>();
+        private String currentQueueItemId = "";
+        private int queueIndex = -1;
+        private LoopMode loopMode = LoopMode.ALL;
+    }
+
+    private static class QueueMediaPayload {
+        private String queueItemId = "";
+        private String url = "";
+        private String title = "";
+        private String artist = "";
+        private String thumbnail = "";
+    }
+
+    public enum LoopMode {
+        NONE,
+        ONE,
+        ALL
     }
 }
