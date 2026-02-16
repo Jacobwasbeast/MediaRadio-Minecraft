@@ -390,15 +390,9 @@ public class ClientAudioEngine {
             return;
         }
 
-        if (!isRadioHeldInHands(minecraft, session.radioId)) {
-            if (session.channel != null && session.channel.isPlaying()) {
-                session.pausedPositionMs = session.channel.getEstimatedPositionMs();
-                session.pausedState = true;
-                // Keep intent so switching back resumes.
-                session.intendedPlaying = true;
-                session.channel.pause();
-            }
-            persistRuntimeToSession(minecraft, session);
+        // Handheld radios continue playback while in inventory.
+        // Orphaned radios are pruned at the start of this tick.
+        if (!isRadioInInventory(minecraft, session.radioId)) {
             return;
         }
 
@@ -519,7 +513,7 @@ public class ClientAudioEngine {
         if (session == null || !session.intendedPlaying || session.url.isBlank()) {
             return;
         }
-        if (!isRadioHeldInHands(minecraft, session.radioId)) {
+        if (!isRadioInInventory(minecraft, session.radioId)) {
             return;
         }
 
@@ -557,7 +551,8 @@ public class ClientAudioEngine {
             return;
         }
 
-        if (isRadioHeldInHands(minecraft, activeHandheldRadioId)) {
+        // Keep current session context while that radio still exists in inventory.
+        if (isRadioInInventory(minecraft, activeHandheldRadioId)) {
             return;
         }
 
@@ -569,6 +564,10 @@ public class ClientAudioEngine {
         if (!offRadioId.isBlank()) {
             setHandheldContext(offRadioId, InteractionHand.OFF_HAND);
         }
+    }
+
+    private boolean isRadioInInventory(Minecraft minecraft, String radioId) {
+        return !findRadioStackById(minecraft, radioId).isEmpty();
     }
 
     private void persistRuntimeToSession(Minecraft minecraft, HandheldSession session) {
