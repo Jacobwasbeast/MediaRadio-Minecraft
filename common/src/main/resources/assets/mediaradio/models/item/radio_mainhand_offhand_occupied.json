@@ -2,24 +2,24 @@
   "parent": "mediaradio:item/radio_handheld",
   "display": {
     "thirdperson_righthand": {
-      "rotation": [14, 76, 40],
-      "translation": [0.2, 1.5, 0.2],
-      "scale": [0.78, 0.78, 0.78]
+      "rotation": [6, 78, 16],
+      "translation": [0.05, 0.95, 0.0],
+      "scale": [0.52, 0.52, 0.52]
     },
     "thirdperson_lefthand": {
-      "rotation": [0, -90, -48],
-      "translation": [0.8, 2.0, -0.8],
-      "scale": [0.78, 0.78, 0.78]
+      "rotation": [2, -88, -2],
+      "translation": [0.0, 1.0, 0.0],
+      "scale": [0.52, 0.52, 0.52]
     },
     "firstperson_righthand": {
-      "rotation": [0, 30, 8],
-      "translation": [0.88, 1.22, 0.35],
-      "scale": [0.78, 0.78, 0.78]
+      "rotation": [2, 34, 6],
+      "translation": [0.60, 1.28, 0.36],
+      "scale": [0.56, 0.56, 0.56]
     },
     "firstperson_lefthand": {
-      "rotation": [0, -102, -38],
-      "translation": [0.25, 3.2, 0.1],
-      "scale": [0.78, 0.78, 0.78]
+      "rotation": [0, -40, 0],
+      "translation": [0.62, 1.45, 0.42],
+      "scale": [0.56, 0.56, 0.56]
     },
     "ground": {
       "rotation": [0, 0, 0],

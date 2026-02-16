@@ -1,35 +1,35 @@
 {
-  "parent": "mediaradio:block/radio_block",
+  "parent": "mediaradio:item/radio_handheld",
   "display": {
     "thirdperson_righthand": {
-      "rotation": [10, 45, 10],
-      "translation": [0.0, 3.0, 1.0],
-      "scale": [0.5, 0.5, 0.5]
+      "rotation": [14, 62, 20],
+      "translation": [0.0, 0.85, 0.0],
+      "scale": [0.52, 0.52, 0.52]
     },
     "thirdperson_lefthand": {
-      "rotation": [10, -45, -10],
-      "translation": [0.0, 3.0, 1.0],
-      "scale": [0.5, 0.5, 0.5]
+      "rotation": [14, -62, -20],
+      "translation": [0.0, 0.85, 0.0],
+      "scale": [0.52, 0.52, 0.52]
     },
     "firstperson_righthand": {
-      "rotation": [0, 35, 0],
-      "translation": [0.4, 1.4, 0.8],
-      "scale": [0.6, 0.6, 0.6]
+      "rotation": [8, 32, 4],
+      "translation": [0.58, 1.18, 0.34],
+      "scale": [0.56, 0.56, 0.56]
     },
     "firstperson_lefthand": {
-      "rotation": [0, -35, 0],
-      "translation": [0.4, 1.4, 0.8],
-      "scale": [0.6, 0.6, 0.6]
+      "rotation": [8, -32, -4],
+      "translation": [0.58, 1.18, 0.34],
+      "scale": [0.56, 0.56, 0.56]
     },
     "gui": {
-      "rotation": [30, 225, 0],
+      "rotation": [30, 45, 0],
       "translation": [0, 0, 0],
-      "scale": [0.8, 0.8, 0.8]
+      "scale": [0.84, 0.84, 0.84]
     },
     "ground": {
       "rotation": [0, 0, 0],
       "translation": [0, 2, 0],
-      "scale": [0.5, 0.5, 0.5]
+      "scale": [0.52, 0.52, 0.52]
     }
   }
 }

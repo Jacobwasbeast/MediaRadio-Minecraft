@@ -1,8 +1,10 @@
 package net.jacobwasbeast.mediaradio.mixin;
 
+import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
@@ -30,16 +32,28 @@ public class HumanoidModelMixin<T extends LivingEntity> {
             return;
         }
 
-        boolean mainHandRadio = player.getMainHandItem().is(ModItems.RADIO_ITEM);
-        boolean offHandRadio = player.getOffhandItem().is(ModItems.RADIO_ITEM);
+        ItemStack mainStack = player.getMainHandItem();
+        ItemStack offStack = player.getOffhandItem();
+        boolean mainHandRadio = mainStack.is(ModItems.RADIO_ITEM);
+        boolean offHandRadio = offStack.is(ModItems.RADIO_ITEM);
+        boolean mainHandPlaceMode = mainHandRadio && RadioItem.isPlaceMode(mainStack);
+        boolean offHandPlaceMode = offHandRadio && RadioItem.isPlaceMode(offStack);
         HumanoidArm mainArm = player.getMainArm();
 
         if (offHandRadio) {
             ModelPart arm = mainArm == HumanoidArm.RIGHT ? leftArm : rightArm;
             float side = mainArm == HumanoidArm.RIGHT ? -1f : 1f;
-            arm.xRot = -1.85f + head.xRot * 0.08f;
-            arm.yRot = side * 0.65f + head.yRot * 0.25f;
-            arm.zRot = side * 0.35f;
+            if (offHandPlaceMode) {
+                // Lower carry pose in place mode.
+                arm.xRot = -0.95f + head.xRot * 0.10f;
+                arm.yRot = side * 0.35f + head.yRot * 0.10f;
+                arm.zRot = side * 0.06f;
+            } else {
+                // Offhand hold near ear.
+                arm.xRot = -1.55f + head.xRot * 0.10f;
+                arm.yRot = side * 0.55f + head.yRot * 0.25f;
+                arm.zRot = side * 0.16f;
+            }
         }
 
         if (mainHandRadio) {
@@ -47,14 +61,21 @@ public class HumanoidModelMixin<T extends LivingEntity> {
             ModelPart arm = mainArm == HumanoidArm.RIGHT ? rightArm : leftArm;
             float side = mainArm == HumanoidArm.RIGHT ? -1f : 1f;
 
-            if (offhandOccupied) {
-                arm.xRot = -0.95f;
-                arm.yRot = side * 0.45f;
-                arm.zRot = side * 0.08f;
+            if (mainHandPlaceMode) {
+                // Lower carry pose in place mode.
+                arm.xRot = -0.95f + head.xRot * 0.10f;
+                arm.yRot = side * 0.15f + head.yRot * 0.10f;
+                arm.zRot = side * 0.05f;
+            } else if (offhandOccupied) {
+                // Main-hand radio when offhand is busy: closer to chest.
+                arm.xRot = -1.10f + head.xRot * 0.08f;
+                arm.yRot = side * 0.26f + head.yRot * 0.12f;
+                arm.zRot = side * 0.03f;
             } else {
-                arm.xRot = -1.45f;
-                arm.yRot = side * 0.25f;
-                arm.zRot = side * 0.22f;
+                // Main-hand free pose near face.
+                arm.xRot = -1.45f + head.xRot * 0.12f;
+                arm.yRot = side * 0.38f + head.yRot * 0.18f;
+                arm.zRot = side * 0.10f;
             }
         }
     }

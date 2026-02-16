@@ -154,7 +154,13 @@ public class MediaRadioClient {
             return 0f;
         }
 
-        boolean mainHandRadio = entity.getMainHandItem().is(ModItems.RADIO_ITEM);
+        // Only apply this transform to the actual main-hand radio stack, not any other radio stack
+        // in offhand/inventory. This keeps per-mode model sizing and pose selection stable.
+        if (entity.getMainHandItem() != stack) {
+            return 0f;
+        }
+
+        boolean mainHandRadio = stack.is(ModItems.RADIO_ITEM);
         boolean offHandOccupied = !entity.getOffhandItem().isEmpty();
 
         return mainHandRadio && offHandOccupied ? 1f : 0f;

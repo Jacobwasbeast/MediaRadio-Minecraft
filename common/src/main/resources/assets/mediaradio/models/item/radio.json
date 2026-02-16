@@ -3,15 +3,15 @@
   "overrides": [
     {
       "predicate": {
-        "mediaradio:offhand_occupied": 1.0
-      },
-      "model": "mediaradio:item/radio_mainhand_offhand_occupied"
-    },
-    {
-      "predicate": {
         "mediaradio:place_mode": 1.0
       },
       "model": "mediaradio:item/radio_place_mode"
+    },
+    {
+      "predicate": {
+        "mediaradio:offhand_occupied": 1.0
+      },
+      "model": "mediaradio:item/radio_mainhand_offhand_occupied"
     }
   ]
 }
