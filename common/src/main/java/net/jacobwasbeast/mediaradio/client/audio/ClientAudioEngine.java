@@ -369,6 +369,10 @@ public class ClientAudioEngine {
         if (session == null) {
             return;
         }
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        if (!session.radioId.equals(repository.getActiveRadioId())) {
+            repository.setActiveRadioId(session.radioId);
+        }
 
         // While the radio is in block placement mode, keep playback paused locally.
         // We still preserve intendedPlaying so placing the radio can resume playback.
@@ -409,22 +413,22 @@ public class ClientAudioEngine {
         }
 
         session.channel.tick();
-        persistRuntimeToSession(minecraft, session);
 
         boolean ended = session.channel.consumeNaturalEnd();
         if (!ended && hasExceededTrackDuration(session.channel)) {
             session.channel.stop();
             ended = true;
         }
-        if (!ended && !(session.channel.getCurrentUrl().isBlank() && !session.title.isBlank())) {
+        if (!ended) {
+            persistRuntimeToSession(minecraft, session);
             return;
         }
 
-        SharedMediaSnapshot.MediaEntry next = ClientMediaRepository.getInstance().nextQueueEntry();
+        alignQueueIndexToCurrentUrl(repository, session.url);
+        SharedMediaSnapshot.MediaEntry next = repository.nextQueueEntry();
         if (next != null && next.url != null && !next.url.isBlank()) {
             playSession(session, next.url, 0L, next.title, next.artist, next.thumbnail);
         } else {
-            persistRuntimeToSession(minecraft, session);
             stopSessionPlayback(session);
             session.url = "";
             session.title = "";
@@ -434,6 +438,7 @@ public class ClientAudioEngine {
             session.pausedState = false;
             session.intendedPlaying = false;
         }
+        persistRuntimeToSession(minecraft, session);
     }
 
     private void playSession(HandheldSession session, String url, long positionMs, String displayTitle, String artist, String thumbnail) {
@@ -755,13 +760,72 @@ public class ClientAudioEngine {
         }
 
         for (BlockPos blockPos : endedNaturally) {
-            blockEndSuppressTicks.put(blockPos, 40);
-            RadioAudioChannel channel = blockChannels.remove(blockPos);
-            if (channel != null) {
-                channel.stop();
-            }
-            sendBlockStopIfPlaying(minecraft, blockPos);
+            handleBlockNaturalEnd(minecraft, blockPos);
         }
+    }
+
+    private void handleBlockNaturalEnd(Minecraft minecraft, BlockPos blockPos) {
+        RadioAudioChannel channel = blockChannels.remove(blockPos);
+        if (channel != null) {
+            channel.stop();
+        }
+
+        if (minecraft.level == null) {
+            return;
+        }
+        if (!(minecraft.level.getBlockEntity(blockPos) instanceof RadioBlockEntity radioBlockEntity)) {
+            return;
+        }
+
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String radioId = safe(radioBlockEntity.getRadioId());
+        String previousActiveRadioId = repository.getActiveRadioId();
+        boolean switchedContext = !radioId.isBlank() && !radioId.equals(previousActiveRadioId);
+
+        try {
+            if (!radioId.isBlank() && switchedContext) {
+                repository.setActiveRadioId(radioId);
+            }
+
+            String queueStateJson = radioBlockEntity.getQueueStateJson();
+            if (!queueStateJson.isBlank()) {
+                repository.importActiveQueueStateJson(queueStateJson);
+            }
+
+            alignQueueIndexToCurrentUrl(repository, safe(radioBlockEntity.getMediaUrl()));
+            SharedMediaSnapshot.MediaEntry next = repository.nextQueueEntry();
+            if (next != null && next.url != null && !next.url.isBlank()) {
+                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                        blockPos,
+                        ServerboundRadioControlMessage.Action.PLAY_URL,
+                        next.url,
+                        safe(next.title),
+                        safe(next.artist),
+                        safe(next.thumbnail),
+                        radioBlockEntity.getVolume(),
+                        0L
+                ));
+                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                        blockPos,
+                        ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                        repository.exportActiveQueueStateJson(),
+                        "",
+                        "",
+                        "",
+                        radioBlockEntity.getVolume(),
+                        0L
+                ));
+                blockEndSuppressTicks.remove(blockPos);
+                return;
+            }
+        } finally {
+            if (switchedContext) {
+                repository.setActiveRadioId(previousActiveRadioId);
+            }
+        }
+
+        blockEndSuppressTicks.put(blockPos, 40);
+        sendBlockStopIfPlaying(minecraft, blockPos);
     }
 
     private void sendBlockStopIfPlaying(Minecraft minecraft, BlockPos blockPos) {
@@ -801,8 +865,39 @@ public class ClientAudioEngine {
         if (duration <= 0L) {
             return false;
         }
+        if (channel.isPaused()) {
+            return false;
+        }
         long position = channel.getEstimatedPositionMs();
-        return position > duration + 1200L && !channel.isPlaying();
+        return position + 250L >= duration;
+    }
+
+    private void alignQueueIndexToCurrentUrl(ClientMediaRepository repository, String currentUrl) {
+        if (repository == null || currentUrl == null || currentUrl.isBlank()) {
+            return;
+        }
+        SharedMediaSnapshot.MediaEntry current = repository.getCurrentQueueEntry();
+        if (current != null && current.url != null && currentUrl.equals(current.url)) {
+            return;
+        }
+        var queueEntries = repository.getQueueEntries();
+        int matchedIndex = -1;
+        for (int i = 0; i < queueEntries.size(); i++) {
+            SharedMediaSnapshot.MediaEntry entry = queueEntries.get(i);
+            if (entry == null || entry.url == null) {
+                continue;
+            }
+            if (currentUrl.equals(entry.url)) {
+                if (matchedIndex != -1) {
+                    // Ambiguous URL (duplicate entries) - preserve existing queue pointer.
+                    return;
+                }
+                matchedIndex = i;
+            }
+        }
+        if (matchedIndex != -1) {
+            repository.setQueueIndex(matchedIndex);
+        }
     }
 
     private static class HandheldSession {

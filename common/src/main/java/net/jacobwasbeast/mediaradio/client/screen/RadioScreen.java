@@ -575,7 +575,6 @@ public class RadioScreen extends Screen {
                 && mouseX >= nowTimelineX() && mouseX <= nowTimelineX() + nowTimelineW()
                 && mouseY >= nowTimelineY() && mouseY <= nowTimelineY() + nowTimelineH()) {
             timelineDragging = true;
-            seekFromTimelineMouse(mouseX);
             return true;
         }
 
@@ -651,7 +650,6 @@ public class RadioScreen extends Screen {
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
         if (timelineDragging && button == 0) {
-            seekFromTimelineMouse(mouseX);
             return true;
         }
         return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);

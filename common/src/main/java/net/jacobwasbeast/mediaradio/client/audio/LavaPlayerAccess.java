@@ -95,7 +95,7 @@ public class LavaPlayerAccess {
         }
         audioPlayer.startTrack(track, false);
         AudioInputStream stream = AudioPlayerInputStream.createStream(audioPlayer, audioDataFormat, 3000L, true);
-        return new OpenedTrack(audioPlayer, stream, track.getInfo(), durationMs);
+        return new OpenedTrack(audioPlayer, stream, track, track.getInfo(), durationMs);
     }
 
     private void tryRegisterYoutubeSource() {
@@ -145,6 +145,6 @@ public class LavaPlayerAccess {
         return identifier.trim();
     }
 
-    public record OpenedTrack(AudioPlayer player, AudioInputStream stream, AudioTrackInfo info, long durationMs) {
+    public record OpenedTrack(AudioPlayer player, AudioInputStream stream, AudioTrack track, AudioTrackInfo info, long durationMs) {
     }
 }

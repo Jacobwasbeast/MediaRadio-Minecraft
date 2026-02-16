@@ -13,6 +13,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static org.lwjgl.openal.AL10.AL_BUFFERS_PROCESSED;
@@ -22,6 +23,7 @@ import static org.lwjgl.openal.AL10.AL_FORMAT_STEREO16;
 import static org.lwjgl.openal.AL10.AL_GAIN;
 import static org.lwjgl.openal.AL10.AL_MAX_DISTANCE;
 import static org.lwjgl.openal.AL10.AL_PLAYING;
+import static org.lwjgl.openal.AL10.AL_STOPPED;
 import static org.lwjgl.openal.AL10.AL_POSITION;
 import static org.lwjgl.openal.AL10.AL_REFERENCE_DISTANCE;
 import static org.lwjgl.openal.AL10.AL_ROLLOFF_FACTOR;
@@ -66,21 +68,23 @@ public class RadioAudioChannel {
 
     private final ArrayBlockingQueue<byte[]> pcmQueue = new ArrayBlockingQueue<>(40);
     private final Queue<Integer> queuedBuffers = new ArrayDeque<>();
+    private final AtomicLong decodeGeneration = new AtomicLong();
 
     private int sourceId = -1;
-    private boolean paused;
-    private boolean stopping;
-    private boolean decoderEnded;
-    private boolean endedNaturally;
+    private volatile boolean paused;
+    private volatile boolean stopping;
+    private volatile boolean decoderEnded;
+    private volatile boolean endedNaturally;
 
-    private String currentUrl = "";
-    private String displayTitle = "";
-    private long desiredStartPositionMs;
-    private long lastStartMillis;
-    private long pausedPositionMs = -1L;
-    private long trackDurationMs = -1L;
+    private volatile String currentUrl = "";
+    private volatile String displayTitle = "";
+    private volatile long desiredStartPositionMs;
+    private volatile long lastStartMillis;
+    private volatile long pausedPositionMs = -1L;
+    private volatile long trackDurationMs = -1L;
+    private volatile com.sedmelluq.discord.lavaplayer.track.AudioTrack activeLavaTrack;
 
-    private CompletableFuture<?> decodeTask;
+    private volatile CompletableFuture<?> decodeTask;
 
     public RadioAudioChannel(boolean spatial, Supplier<Vec3> positionSupplier, Supplier<Float> volumeSupplier, float maxDistance) {
         this.spatial = spatial;
@@ -102,13 +106,18 @@ public class RadioAudioChannel {
     }
 
     public long getEstimatedPositionMs() {
+        long estimate;
         if (paused && pausedPositionMs >= 0L) {
-            return pausedPositionMs;
+            estimate = pausedPositionMs;
+        } else if (lastStartMillis <= 0L) {
+            estimate = desiredStartPositionMs;
+        } else {
+            estimate = desiredStartPositionMs + Math.max(0L, System.currentTimeMillis() - lastStartMillis);
         }
-        if (lastStartMillis <= 0L) {
-            return desiredStartPositionMs;
+        if (trackDurationMs > 0L) {
+            return Math.min(trackDurationMs, Math.max(0L, estimate));
         }
-        return desiredStartPositionMs + Math.max(0L, System.currentTimeMillis() - lastStartMillis);
+        return Math.max(0L, estimate);
     }
 
     public long getTrackDurationMs() {
@@ -135,7 +144,8 @@ public class RadioAudioChannel {
         endedNaturally = false;
         pcmQueue.clear();
         queuedBuffers.clear();
-        launchDecoder(currentUrl, desiredStartPositionMs);
+        long generation = decodeGeneration.incrementAndGet();
+        launchDecoder(currentUrl, desiredStartPositionMs, generation);
     }
 
     public void pause() {
@@ -164,6 +174,9 @@ public class RadioAudioChannel {
         }
 
         long clamped = Math.max(0L, positionMs);
+        if (trackDurationMs > 0L) {
+            clamped = Math.min(trackDurationMs, clamped);
+        }
         play(currentUrl, clamped);
         if (keepPaused) {
             pause();
@@ -183,6 +196,7 @@ public class RadioAudioChannel {
     }
 
     private void stopInternal(boolean naturalEnd) {
+        decodeGeneration.incrementAndGet();
         stopping = true;
         if (decodeTask != null) {
             decodeTask.cancel(true);
@@ -208,6 +222,7 @@ public class RadioAudioChannel {
         lastStartMillis = 0L;
         pausedPositionMs = -1L;
         trackDurationMs = -1L;
+        activeLavaTrack = null;
         endedNaturally = naturalEnd;
     }
 
@@ -226,6 +241,7 @@ public class RadioAudioChannel {
         }
 
         applySourceSettings();
+        refreshTrackDurationFromLavaTrack();
         releaseProcessedBuffers(false);
         enqueuePendingBuffers();
 
@@ -233,47 +249,89 @@ public class RadioAudioChannel {
             return;
         }
 
-        if (alGetSourcei(sourceId, AL_SOURCE_STATE) != AL_PLAYING && !queuedBuffers.isEmpty()) {
+        int sourceState = alGetSourcei(sourceId, AL_SOURCE_STATE);
+        if (sourceState != AL_PLAYING && !queuedBuffers.isEmpty()) {
             alSourcePlay(sourceId);
+            sourceState = alGetSourcei(sourceId, AL_SOURCE_STATE);
         }
 
-        if (decoderEnded && pcmQueue.isEmpty() && queuedBuffers.isEmpty()) {
+        // On some OpenAL backends, EOF can leave queued buffers lingering in STOPPED state.
+        // Force-drain when decode has ended so natural-end can always be emitted.
+        if (decoderEnded && pcmQueue.isEmpty() && sourceState == AL_STOPPED && !queuedBuffers.isEmpty()) {
+            releaseProcessedBuffers(true);
+            sourceState = alGetSourcei(sourceId, AL_SOURCE_STATE);
+        }
+
+        if (decoderEnded && pcmQueue.isEmpty() && queuedBuffers.isEmpty() && sourceState != AL_PLAYING) {
             stopInternal(true);
         }
     }
 
-    private void launchDecoder(String url, long startPositionMs) {
+    private void launchDecoder(String url, long startPositionMs, long generation) {
         decodeTask = CompletableFuture.runAsync(() -> {
             try {
+                if (!isGenerationCurrent(generation)) {
+                    return;
+                }
                 var track = LavaPlayerAccess.get().loadTrack(url).join();
+                if (!isGenerationCurrent(generation)) {
+                    return;
+                }
                 if (track == null) {
-                    decoderEnded = true;
+                    markDecoderEnded(generation);
                     return;
                 }
 
                 var openedTrack = LavaPlayerAccess.get().openTrack(track, startPositionMs);
+                if (!isGenerationCurrent(generation)) {
+                    openedTrack.player().destroy();
+                    return;
+                }
                 lastStartMillis = System.currentTimeMillis();
-                trackDurationMs = openedTrack.durationMs();
-                if (trackDurationMs <= 0L && openedTrack.info() != null) {
-                    trackDurationMs = openedTrack.info().length;
+                activeLavaTrack = openedTrack.track();
+                trackDurationMs = sanitizeDurationMs(
+                        openedTrack.durationMs(),
+                        openedTrack.info(),
+                        track.getDuration(),
+                        track.getInfo() == null ? -1L : track.getInfo().length,
+                        openedTrack.track() == null ? -1L : openedTrack.track().getDuration(),
+                        openedTrack.track() == null || openedTrack.track().getInfo() == null ? -1L : openedTrack.track().getInfo().length
+                );
+                if (trackDurationMs <= 0L) {
+                    var info = openedTrack.info();
+                    MediaRadio.LOGGER.debug(
+                            "Unknown track duration url={} info.uri={} info.identifier={} info.isStream={} opened.durationMs={} opened.info.length={} loaded.durationMs={} loaded.info.length={} active.durationMs={} active.info.length={}",
+                            url,
+                            info == null ? "" : info.uri,
+                            info == null ? "" : info.identifier,
+                            info != null && info.isStream,
+                            openedTrack.durationMs(),
+                            info == null ? -1L : info.length,
+                            track.getDuration(),
+                            track.getInfo() == null ? -1L : track.getInfo().length,
+                            openedTrack.track() == null ? -1L : openedTrack.track().getDuration(),
+                            openedTrack.track() == null || openedTrack.track().getInfo() == null ? -1L : openedTrack.track().getInfo().length
+                    );
                 }
                 if (displayTitle.isBlank() && openedTrack.info() != null && openedTrack.info().title != null) {
                     displayTitle = openedTrack.info().title;
                 }
 
-                readAudioLoop(openedTrack.stream(), openedTrack.player());
+                readAudioLoop(openedTrack.stream(), openedTrack.player(), generation);
             } catch (Exception exception) {
-                MediaRadio.LOGGER.error("Failed to decode audio for {}", url, exception);
+                if (isGenerationCurrent(generation)) {
+                    MediaRadio.LOGGER.error("Failed to decode audio for {}", url, exception);
+                }
             } finally {
-                decoderEnded = true;
+                markDecoderEnded(generation);
             }
         }, DECODE_EXECUTOR);
     }
 
-    private void readAudioLoop(AudioInputStream audioInputStream, com.sedmelluq.discord.lavaplayer.player.AudioPlayer player) {
+    private void readAudioLoop(AudioInputStream audioInputStream, com.sedmelluq.discord.lavaplayer.player.AudioPlayer player, long generation) {
         byte[] readBuffer = new byte[LavaPlayerAccess.BYTES_PER_SECOND];
         try (audioInputStream) {
-            while (!stopping && !Thread.currentThread().isInterrupted()) {
+            while (isGenerationCurrent(generation) && !Thread.currentThread().isInterrupted()) {
                 int read = audioInputStream.read(readBuffer);
                 if (read < 0) {
                     break;
@@ -284,18 +342,82 @@ public class RadioAudioChannel {
                 byte[] chunk = new byte[read];
                 System.arraycopy(readBuffer, 0, chunk, 0, read);
                 while (!pcmQueue.offer(chunk)) {
-                    if (stopping || Thread.currentThread().isInterrupted()) {
+                    if (!isGenerationCurrent(generation) || Thread.currentThread().isInterrupted()) {
                         return;
                     }
                     Thread.sleep(2L);
                 }
             }
         } catch (Exception exception) {
-            if (!stopping) {
+            if (isGenerationCurrent(generation) && !stopping) {
                 MediaRadio.LOGGER.error("Audio decode stream failed", exception);
             }
         } finally {
             player.destroy();
+        }
+    }
+
+    private boolean isGenerationCurrent(long generation) {
+        return decodeGeneration.get() == generation;
+    }
+
+    private void markDecoderEnded(long generation) {
+        if (isGenerationCurrent(generation)) {
+            decoderEnded = true;
+        }
+    }
+
+    private long sanitizeDurationMs(
+            long openedDurationMs,
+            com.sedmelluq.discord.lavaplayer.track.AudioTrackInfo openedInfo,
+            long loadedTrackDurationMs,
+            long loadedInfoLengthMs,
+            long activeTrackDurationMs,
+            long activeInfoLengthMs
+    ) {
+        long result = normalizeDuration(openedDurationMs);
+        if (result <= 0L) {
+            result = normalizeDuration(openedInfo == null ? -1L : openedInfo.length);
+        }
+        if (result <= 0L) {
+            result = normalizeDuration(loadedTrackDurationMs);
+        }
+        if (result <= 0L) {
+            result = normalizeDuration(loadedInfoLengthMs);
+        }
+        if (result <= 0L) {
+            result = normalizeDuration(activeTrackDurationMs);
+        }
+        if (result <= 0L) {
+            result = normalizeDuration(activeInfoLengthMs);
+        }
+
+        if (result <= 0L) {
+            return -1L;
+        }
+        return result;
+    }
+
+    private long normalizeDuration(long value) {
+        return (value <= 0L || value == Long.MAX_VALUE) ? -1L : value;
+    }
+
+    private void refreshTrackDurationFromLavaTrack() {
+        if (trackDurationMs > 0L) {
+            return;
+        }
+        var track = activeLavaTrack;
+        if (track == null) {
+            return;
+        }
+
+        long refreshed = normalizeDuration(track.getDuration());
+        if (refreshed <= 0L) {
+            var info = track.getInfo();
+            refreshed = normalizeDuration(info == null ? -1L : info.length);
+        }
+        if (refreshed > 0L) {
+            trackDurationMs = refreshed;
         }
     }
 
