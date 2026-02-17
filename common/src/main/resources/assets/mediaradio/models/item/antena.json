@@ -1,6 +1,10 @@
 {
-  "parent": "minecraft:item/generated",
-  "textures": {
-    "layer0": "mediaradio:item/antenna_rod"
+  "parent": "mediaradio:block/antenna_block",
+  "display": {
+      "gui": {
+          "rotation": [0, -24, 0],
+          "translation": [1, -6.5, 0],
+          "scale": [2.34, 2.12, 2.14]
+      }
   }
 }
