@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0
+
+- Added Create-focused playback support improvements and contraption audio behavior fixes.
+- Added inventory-sharing workflow improvements for handheld playback context.
+- Added client playback configuration controls.
+- Fixed multiple networking synchronization issues affecting remote clients.
+- Fixed loop handling edge cases.
+- Fixed several rendering issues, including contraption/overlay alignment and occlusion behavior.
+- Fixed radio GUI facing/orientation behavior.
+- Updated placeholder assets for antenna and display material items.
+
 ## 1.0.0
 
 - Initial public baseline for Media Radio.
