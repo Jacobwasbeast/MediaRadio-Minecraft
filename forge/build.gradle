@@ -72,15 +72,21 @@ jar {
 }
 
 tasks.register('noShadowJar', Jar) {
+    dependsOn(tasks.compileJava)
     archiveClassifier.set("no-shadow")
     from(sourceSets.main.output)
+    from("$buildDir/mixin/${mod_id}.refmap.json")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     manifest.attributes([
             "MixinConfigs": "${mod_id}.mixins.json,${mod_id}.forge.mixins.json"
     ])
 }
 
-build.dependsOn(tasks.named('noShadowJar'))
+def reobfNoShadowJar = obfuscation.reobfuscate(tasks.named('noShadowJar', Jar), sourceSets.main) {
+    it.archiveClassifier.set("no-shadow")
+}
+
+build.dependsOn(reobfNoShadowJar)
 
 shadowJar {
     archiveClassifier.set("shadow")

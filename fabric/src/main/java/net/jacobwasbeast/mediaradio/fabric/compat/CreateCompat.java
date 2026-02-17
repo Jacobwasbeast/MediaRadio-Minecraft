@@ -158,7 +158,7 @@ public final class CreateCompat {
             long positionMs = runtime != null ? runtime.positionMs() : playbackFromNbt(nbt);
             float volume = runtime != null ? runtime.volume() : (nbt == null ? 1.0f : nbt.getFloat(RadioBlockEntity.TAG_VOLUME));
 
-            PoseStack poseStack = matrices.getViewProjection();
+            PoseStack poseStack = matrices.getModel();
             poseStack.pushPose();
             poseStack.translate(context.localPos.getX(), context.localPos.getY(), context.localPos.getZ());
             RadioBlockEntityRenderer.renderRadioDisplay(
