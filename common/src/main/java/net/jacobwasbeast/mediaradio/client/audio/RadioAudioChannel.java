@@ -161,6 +161,12 @@ public class RadioAudioChannel {
     }
 
     public void resume() {
+        if (!paused) {
+            if (sourceId != -1 && !queuedBuffers.isEmpty() && alGetSourcei(sourceId, AL_SOURCE_STATE) != AL_PLAYING) {
+                alSourcePlay(sourceId);
+            }
+            return;
+        }
         if (pausedPositionMs >= 0L) {
             desiredStartPositionMs = pausedPositionMs;
             lastStartMillis = System.currentTimeMillis();

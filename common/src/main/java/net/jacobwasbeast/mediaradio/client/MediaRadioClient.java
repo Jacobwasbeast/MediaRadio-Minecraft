@@ -27,7 +27,6 @@ import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
 import java.util.List;
 
 public class MediaRadioClient {
-
     public static void initialize() {
         ModKeyMappings.initialize();
         ClientMediaRepository.initialize();
@@ -192,7 +191,11 @@ public class MediaRadioClient {
         if (entityId <= 0) {
             return;
         }
+        boolean wasExternal = audioEngine.hasExternalContext(radioId);
         audioEngine.setExternalContext(radioId, entityId, null);
+        if (!wasExternal) {
+            ModNetworking.requestRadioState(radioId);
+        }
     }
 
     private static void registerItemPredicates() {

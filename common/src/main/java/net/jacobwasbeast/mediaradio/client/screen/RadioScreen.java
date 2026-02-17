@@ -2627,9 +2627,13 @@ public class RadioScreen extends Screen {
         }
         RadioBlockEntity blockEntity = getBlockEntity();
         if (blockEntity == null) {
-            return "";
+            return lastBoundBlockRadioId == null ? "" : lastBoundBlockRadioId;
         }
-        return blockEntity.getRadioId();
+        String radioId = blockEntity.getRadioId();
+        if (radioId == null || radioId.isBlank()) {
+            return lastBoundBlockRadioId == null ? "" : lastBoundBlockRadioId;
+        }
+        return radioId;
     }
 
     private void sendBlockRadioControl(

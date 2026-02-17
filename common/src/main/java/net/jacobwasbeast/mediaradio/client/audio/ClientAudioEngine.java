@@ -30,6 +30,11 @@ public class ClientAudioEngine {
     private static final double EXTERNAL_POSITION_SMOOTHING_HZ = 12.0D;
     private static final double EXTERNAL_POSITION_TELEPORT_SNAP_DISTANCE_SQR = 64.0D;
     private static final double EXTERNAL_POSITION_MAX_DT_SECONDS = 0.1D;
+    private static final float HANDHELD_EXTERNAL_MAX_DISTANCE = 24f;
+    private static final double HANDHELD_EXTERNAL_MAX_DISTANCE_SQR = HANDHELD_EXTERNAL_MAX_DISTANCE * HANDHELD_EXTERNAL_MAX_DISTANCE;
+    private static final float CONTRAPTION_EXTERNAL_MAX_DISTANCE = 30f;
+    private static final long EXTERNAL_CONTEXT_TTL_CONTRAPTION_TICKS = 40L;
+    private static final long EXTERNAL_CONTEXT_TTL_HANDHELD_TICKS = 200L;
     private static final long REMOTE_PLAYING_DRIFT_CORRECTION_MS = 12_000L;
     private static final long REMOTE_PAUSED_DRIFT_CORRECTION_MS = 500L;
     private static final long REMOTE_FORCE_SYNC_MIN_DRIFT_MS = 250L;
@@ -766,7 +771,8 @@ public class ClientAudioEngine {
                 context.lastSeenGameTick = now;
                 continue;
             }
-            if (now - context.lastSeenGameTick > 40L) {
+            long ttlTicks = context.localPos == null ? EXTERNAL_CONTEXT_TTL_HANDHELD_TICKS : EXTERNAL_CONTEXT_TTL_CONTRAPTION_TICKS;
+            if (now - context.lastSeenGameTick > ttlTicks) {
                 stale.add(radioId);
             }
         }
@@ -791,22 +797,12 @@ public class ClientAudioEngine {
     }
 
     private void playSession(HandheldSession session, String url, long positionMs, String displayTitle, String artist, String thumbnail) {
-        ExternalRadioContext externalContext = externalContexts.get(session.radioId);
-        boolean shouldBePositional = externalContext != null;
+        boolean shouldBePositional = externalContexts.get(session.radioId) != null;
         if (session.channel == null || session.channel.isPositional() != shouldBePositional) {
             if (session.channel != null) {
                 session.channel.stop();
             }
-            if (shouldBePositional) {
-                session.channel = new RadioAudioChannel(
-                        true,
-                        () -> resolveExternalSourcePosition(externalContext),
-                        () -> session.volume,
-                        30f
-                );
-            } else {
-                session.channel = new RadioAudioChannel(false, () -> Vec3.ZERO, () -> session.volume, 1f);
-            }
+            session.channel = createSessionChannel(session, shouldBePositional);
         }
         session.channel.setDisplayTitle(displayTitle);
         session.channel.play(url, positionMs);
@@ -837,16 +833,7 @@ public class ClientAudioEngine {
         ExternalRadioContext externalContext = externalContexts.get(session.radioId);
         boolean shouldBePositional = externalContext != null;
         if (session.channel == null) {
-            if (shouldBePositional) {
-                session.channel = new RadioAudioChannel(
-                        true,
-                        () -> resolveExternalSourcePosition(externalContext),
-                        () -> session.volume,
-                        30f
-                );
-            } else {
-                session.channel = new RadioAudioChannel(false, () -> Vec3.ZERO, () -> session.volume, 1f);
-            }
+            session.channel = createSessionChannel(session, shouldBePositional);
             session.channel.setDisplayTitle(session.title);
             session.channel.play(session.url, Math.max(0L, session.pausedPositionMs));
             session.pausedState = false;
@@ -855,16 +842,7 @@ public class ClientAudioEngine {
 
         if (session.channel.isPositional() != shouldBePositional) {
             session.channel.stop();
-            if (shouldBePositional) {
-                session.channel = new RadioAudioChannel(
-                        true,
-                        () -> resolveExternalSourcePosition(externalContext),
-                        () -> session.volume,
-                        30f
-                );
-            } else {
-                session.channel = new RadioAudioChannel(false, () -> Vec3.ZERO, () -> session.volume, 1f);
-            }
+            session.channel = createSessionChannel(session, shouldBePositional);
             session.channel.setDisplayTitle(session.title);
             session.channel.play(session.url, Math.max(0L, session.pausedPositionMs));
             session.pausedState = false;
@@ -898,17 +876,7 @@ public class ClientAudioEngine {
             return;
         }
 
-        ExternalRadioContext externalContext = externalContexts.get(session.radioId);
-        if (shouldBePositional) {
-            session.channel = new RadioAudioChannel(
-                    true,
-                    () -> resolveExternalSourcePosition(externalContext),
-                    () -> session.volume,
-                    30f
-            );
-        } else {
-            session.channel = new RadioAudioChannel(false, () -> Vec3.ZERO, () -> session.volume, 1f);
-        }
+        session.channel = createSessionChannel(session, shouldBePositional);
         session.channel.setDisplayTitle(activeTitle);
         session.channel.play(activeUrl, Math.max(0L, resumePosition));
         if (!shouldKeepPlaying) {
@@ -920,6 +888,49 @@ public class ClientAudioEngine {
         }
         session.intendedPlaying = shouldKeepPlaying;
         session.pausedPositionMs = Math.max(0L, resumePosition);
+    }
+
+    private RadioAudioChannel createSessionChannel(HandheldSession session, boolean shouldBePositional) {
+        if (shouldBePositional) {
+            return new RadioAudioChannel(
+                    true,
+                    () -> resolveExternalSourcePosition(session.radioId),
+                    () -> resolveExternalSessionVolume(session, session.radioId),
+                    resolveExternalMaxDistance(session.radioId)
+            );
+        }
+        return new RadioAudioChannel(false, () -> Vec3.ZERO, () -> Mth.clamp(session.volume, 0f, 2f), 1f);
+    }
+
+    private float resolveExternalSessionVolume(HandheldSession session, String radioId) {
+        float baseVolume = Mth.clamp(session == null ? 1.0f : session.volume, 0f, 2f);
+        ExternalRadioContext context = externalContexts.get(radioId);
+        if (context == null || context.localPos != null) {
+            return baseVolume;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || minecraft.player == null) {
+            return 0f;
+        }
+        Vec3 sourcePos = context.lastKnownPos;
+        Entity sourceEntity = minecraft.level.getEntity(context.contraptionEntityId);
+        if (sourceEntity != null) {
+            sourcePos = sourceEntity.position();
+            context.lastKnownPos = sourcePos;
+        }
+        if (sourcePos == null || minecraft.player.position().distanceToSqr(sourcePos) > HANDHELD_EXTERNAL_MAX_DISTANCE_SQR) {
+            return 0f;
+        }
+        return baseVolume;
+    }
+
+    private float resolveExternalMaxDistance(String radioId) {
+        ExternalRadioContext context = externalContexts.get(radioId);
+        if (context != null && context.localPos == null) {
+            return HANDHELD_EXTERNAL_MAX_DISTANCE;
+        }
+        return CONTRAPTION_EXTERNAL_MAX_DISTANCE;
     }
 
     private void syncActiveContextFromHeldHands(Minecraft minecraft) {
@@ -1061,13 +1072,7 @@ public class ClientAudioEngine {
 
         boolean shouldBePositional = externalContexts.get(session.radioId) != null;
         if (session.channel == null && shouldBePositional && playing && !session.url.isBlank()) {
-            ExternalRadioContext externalContext = externalContexts.get(session.radioId);
-            session.channel = new RadioAudioChannel(
-                    true,
-                    () -> resolveExternalSourcePosition(externalContext),
-                    () -> session.volume,
-                    30f
-            );
+            session.channel = createSessionChannel(session, true);
             session.channel.setDisplayTitle(session.title);
             session.channel.play(session.url, session.pausedPositionMs);
             return;
@@ -1106,10 +1111,14 @@ public class ClientAudioEngine {
             }
 
             if (playing) {
-                session.channel.resume();
+                if (session.channel.isPaused() || !session.channel.isPlaying()) {
+                    session.channel.resume();
+                }
                 session.pausedState = false;
             } else {
-                session.channel.pause();
+                if (!session.channel.isPaused()) {
+                    session.channel.pause();
+                }
                 session.pausedState = true;
             }
         }
@@ -1125,6 +1134,10 @@ public class ClientAudioEngine {
         }
         // If this client owns the radio item, avoid forcing seeks from echoed server snapshots.
         return findRadioStackById(minecraft, session.radioId).isEmpty();
+    }
+
+    private Vec3 resolveExternalSourcePosition(String radioId) {
+        return resolveExternalSourcePosition(externalContexts.get(radioId));
     }
 
     private Vec3 resolveExternalSourcePosition(ExternalRadioContext context) {

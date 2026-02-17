@@ -1,6 +1,8 @@
 package net.jacobwasbeast.mediaradio.server;
 
 import net.blay09.mods.balm.api.Balm;
+import net.blay09.mods.balm.api.event.TickPhase;
+import net.blay09.mods.balm.api.event.TickType;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
@@ -28,7 +30,11 @@ import java.net.URISyntaxException;
 public class SharedMediaManager {
     private static final long CHUNK_TTL_MS = 30_000L;
     private static final int MAX_QUEUE_STATE_RADIO_PACKET = 8_192;
+    private static final int HANDHELD_PERIODIC_SYNC_INTERVAL_TICKS = 40;
+    private static final double HANDHELD_LISTENER_SYNC_RANGE_SQR = 96.0D * 96.0D;
+    private static final double BLOCK_CONTROL_MAX_DISTANCE_SQR = 24.0D * 24.0D;
     private static final Map<String, ChunkAccumulator> CHUNK_UPLOADS = new HashMap<>();
+    private static final Map<String, HandheldListenerContext> ACTIVE_HANDHELD_LISTENER_CONTEXTS = new HashMap<>();
 
     public static void initialize() {
         Balm.getEvents().onEvent(net.blay09.mods.balm.api.event.PlayerLoginEvent.class,
@@ -36,6 +42,8 @@ public class SharedMediaManager {
                     ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshot(event.getPlayer().server));
                     syncActiveHandheldRadiosToPlayer(event.getPlayer());
                 });
+        Balm.getEvents().onTickEvent(TickType.Server, TickPhase.End,
+                (net.blay09.mods.balm.api.event.ServerTickHandler) SharedMediaManager::syncActiveHandheldRadiosToNearbyPlayers);
     }
 
     public static String getSnapshot(MinecraftServer server) {
@@ -106,18 +114,20 @@ public class SharedMediaManager {
         RadioBlockEntity radioBlockEntity = null;
         String radioId = safe(message.radioId());
         if (blockPos != null) {
-            if (player.distanceToSqr(blockPos.getX() + 0.5d, blockPos.getY() + 0.5d, blockPos.getZ() + 0.5d) > 144d) {
+            if (player.distanceToSqr(blockPos.getX() + 0.5d, blockPos.getY() + 0.5d, blockPos.getZ() + 0.5d) > BLOCK_CONTROL_MAX_DISTANCE_SQR) {
                 return;
             }
             BlockEntity blockEntity = player.level().getBlockEntity(blockPos);
-            if (!(blockEntity instanceof RadioBlockEntity resolvedRadioBlockEntity)) {
+            if (blockEntity instanceof RadioBlockEntity resolvedRadioBlockEntity) {
+                radioBlockEntity = resolvedRadioBlockEntity;
+                String blockRadioId = safe(radioBlockEntity.getRadioId());
+                if (blockRadioId.isBlank()) {
+                    blockRadioId = !radioId.isBlank() ? radioId : UUID.randomUUID().toString();
+                    radioBlockEntity.setRadioId(blockRadioId);
+                }
+                radioId = blockRadioId;
+            } else if (radioId.isBlank()) {
                 return;
-            }
-            radioBlockEntity = resolvedRadioBlockEntity;
-            radioId = safe(radioBlockEntity.getRadioId());
-            if (radioId.isBlank()) {
-                radioId = UUID.randomUUID().toString();
-                radioBlockEntity.setRadioId(radioId);
             }
         } else if (radioId.isBlank()) {
             return;
@@ -247,7 +257,7 @@ public class SharedMediaManager {
         }
 
         for (ServerPlayer other : player.server.getPlayerList().getPlayers()) {
-            if (other == null || other == player) {
+            if (!shouldBroadcastToHandheldListener(player, other)) {
                 continue;
             }
             ModNetworking.sendPlayerRadioContext(other, radioId, player.getId(), contextActive);
@@ -473,7 +483,7 @@ public class SharedMediaManager {
 
         // While playing, only broadcast larger jumps here. Periodic correction is handled separately.
         if (current.playing) {
-            return Math.abs(currentPosition - previousPosition) >= 2_000L;
+            return false;
         }
         // While paused/stopped, propagate meaningful seek updates.
         return Math.abs(currentPosition - previousPosition) >= 250L;
@@ -533,6 +543,89 @@ public class SharedMediaManager {
                 ));
             }
         }
+    }
+
+    private static void syncActiveHandheldRadiosToNearbyPlayers(MinecraftServer server) {
+        if (server == null || server.getTickCount() % HANDHELD_PERIODIC_SYNC_INTERVAL_TICKS != 0) {
+            return;
+        }
+        var players = server.getPlayerList().getPlayers();
+        if (players.isEmpty()) {
+            return;
+        }
+
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(server);
+        Set<String> currentActiveContexts = new HashSet<>();
+        for (ServerPlayer owner : players) {
+            if (owner == null) {
+                continue;
+            }
+            Set<String> heldRadioIds = heldHandRadioIds(owner);
+            if (heldRadioIds.isEmpty()) {
+                continue;
+            }
+            for (String radioId : heldRadioIds) {
+                RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.get(radioId);
+                if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
+                    continue;
+                }
+                long position = runtimeData.currentPositionMs(state);
+                String queueForPacket = queueStateForPacket(state.queueStateJson);
+                long sentAtMs = System.currentTimeMillis();
+                for (ServerPlayer listener : players) {
+                    if (!shouldBroadcastToHandheldListener(owner, listener)) {
+                        continue;
+                    }
+                    String contextKey = handheldContextKey(owner, listener, radioId);
+                    currentActiveContexts.add(contextKey);
+                    ModNetworking.sendPlayerRadioContext(listener, radioId, owner.getId(), true);
+                    if (!ACTIVE_HANDHELD_LISTENER_CONTEXTS.containsKey(contextKey)) {
+                        ModNetworking.sendRadioState(listener, new ClientboundRadioStateMessage(
+                                radioId,
+                                safe(state.url),
+                                safe(state.title),
+                                safe(state.artist),
+                                safe(state.thumbnail),
+                                queueForPacket,
+                                Mth.clamp(state.volume, 0f, 2f),
+                                position,
+                                sentAtMs,
+                                true,
+                                false,
+                                state.playing
+                        ));
+                    }
+                    ACTIVE_HANDHELD_LISTENER_CONTEXTS.put(contextKey, new HandheldListenerContext(listener.getUUID(), radioId));
+                }
+            }
+        }
+
+        Set<String> staleContexts = new HashSet<>(ACTIVE_HANDHELD_LISTENER_CONTEXTS.keySet());
+        staleContexts.removeAll(currentActiveContexts);
+        for (String staleKey : staleContexts) {
+            HandheldListenerContext context = ACTIVE_HANDHELD_LISTENER_CONTEXTS.remove(staleKey);
+            if (context == null) {
+                continue;
+            }
+            ServerPlayer listener = server.getPlayerList().getPlayer(context.listenerUuid);
+            if (listener != null) {
+                ModNetworking.sendPlayerRadioContext(listener, context.radioId, 0, false);
+            }
+        }
+    }
+
+    private static String handheldContextKey(ServerPlayer owner, ServerPlayer listener, String radioId) {
+        return owner.getUUID() + "|" + listener.getUUID() + "|" + safe(radioId);
+    }
+
+    private static boolean shouldBroadcastToHandheldListener(ServerPlayer owner, ServerPlayer listener) {
+        if (owner == null || listener == null || owner == listener) {
+            return false;
+        }
+        if (owner.level() != listener.level()) {
+            return false;
+        }
+        return owner.distanceToSqr(listener) <= HANDHELD_LISTENER_SYNC_RANGE_SQR;
     }
 
     private static Set<String> heldHandRadioIds(ServerPlayer player) {
@@ -661,6 +754,16 @@ public class SharedMediaManager {
                 }
             }
             return builder.toString();
+        }
+    }
+
+    private static class HandheldListenerContext {
+        private final java.util.UUID listenerUuid;
+        private final String radioId;
+
+        private HandheldListenerContext(java.util.UUID listenerUuid, String radioId) {
+            this.listenerUuid = listenerUuid;
+            this.radioId = safe(radioId);
         }
     }
 }
