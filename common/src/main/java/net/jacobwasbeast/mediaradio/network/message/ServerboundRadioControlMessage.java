@@ -5,6 +5,7 @@ import net.minecraft.network.FriendlyByteBuf;
 
 public record ServerboundRadioControlMessage(
         BlockPos blockPos,
+        String radioId,
         Action action,
         String url,
         String title,
@@ -18,7 +19,8 @@ public record ServerboundRadioControlMessage(
 
     public ServerboundRadioControlMessage(FriendlyByteBuf friendlyByteBuf) {
         this(
-                friendlyByteBuf.readBlockPos(),
+                friendlyByteBuf.readBoolean() ? friendlyByteBuf.readBlockPos() : null,
+                friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readEnum(Action.class),
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readUtf(MAX_TITLE_ARTIST),
@@ -29,8 +31,26 @@ public record ServerboundRadioControlMessage(
         );
     }
 
+    public ServerboundRadioControlMessage(
+            BlockPos blockPos,
+            Action action,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            float volume,
+            long positionMs
+    ) {
+        this(blockPos, "", action, url, title, artist, thumbnail, volume, positionMs);
+    }
+
     public void encode(FriendlyByteBuf friendlyByteBuf) {
-        friendlyByteBuf.writeBlockPos(blockPos);
+        boolean hasBlockPos = blockPos != null;
+        friendlyByteBuf.writeBoolean(hasBlockPos);
+        if (hasBlockPos) {
+            friendlyByteBuf.writeBlockPos(blockPos);
+        }
+        friendlyByteBuf.writeUtf(radioId == null ? "" : radioId, MAX_PACKET_STRING);
         friendlyByteBuf.writeEnum(action);
         friendlyByteBuf.writeUtf(url, MAX_PACKET_STRING);
         friendlyByteBuf.writeUtf(title, MAX_TITLE_ARTIST);

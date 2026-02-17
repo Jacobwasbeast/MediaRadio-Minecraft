@@ -90,6 +90,17 @@ repositories {
             includeGroup "dev.lavalink.youtube.plugin"
         }
     }
+
+    maven {
+        url = "https://maven.createmod.net"
+    }
+
+    maven {
+        url = "https://api.modrinth.com/maven"
+        content {
+            includeGroup "maven.modrinth"
+        }
+    }
 	
     exclusiveContent {
         forRepository {

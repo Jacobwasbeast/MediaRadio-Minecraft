@@ -3,6 +3,9 @@ dependencies {
         changing = balm_version.contains("SNAPSHOT")
     }
     modImplementation("net.blay09.mods:kuma-api-forge:${kuma_version}")
+    modCompileOnly("com.simibubi.create:create-1.20.1:${create_forge_version}:slim") {
+        transitive = false
+    }
 
     // Keep compile/runtime resolution in Forge and Common.
     shadowIn("dev.arbjerg:lavaplayer:2.2.6") {

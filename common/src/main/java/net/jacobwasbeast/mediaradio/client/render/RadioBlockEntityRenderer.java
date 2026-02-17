@@ -17,6 +17,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.state.BlockState;
 import net.jacobwasbeast.mediaradio.block.RadioBlock;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
+import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
 import net.jacobwasbeast.mediaradio.client.media.PlaybackDisplayResolver;
@@ -48,30 +49,60 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
 
     @Override
     public void render(RadioBlockEntity blockEntity, float partialTick, PoseStack poseStack, MultiBufferSource bufferSource, int packedLight, int packedOverlay) {
+        long channelPositionMs = ClientAudioEngine.getInstance().getBlockPlaybackPositionMs(blockEntity.getBlockPos());
+        renderRadioDisplay(
+                blockEntity.getBlockState(),
+                blockEntity.getRadioId(),
+                blockEntity.getMediaUrl(),
+                blockEntity.getMediaTitle(),
+                blockEntity.getMediaArtist(),
+                blockEntity.getMediaThumbnail(),
+                blockEntity.isPlaying(),
+                channelPositionMs >= 0L ? channelPositionMs : blockEntity.getPlaybackPositionMs(),
+                blockEntity.getVolume(),
+                poseStack,
+                bufferSource,
+                packedLight
+        );
+    }
+
+    public static void renderRadioDisplay(
+            BlockState blockState,
+            String radioId,
+            String mediaUrl,
+            String mediaTitle,
+            String mediaArtist,
+            String mediaThumbnail,
+            boolean playing,
+            long playbackPositionMs,
+            float volumeLevel,
+            PoseStack poseStack,
+            MultiBufferSource bufferSource,
+            int packedLight
+    ) {
         Minecraft minecraft = Minecraft.getInstance();
         Font font = minecraft.font;
 
         SharedMediaSnapshot.MediaEntry queueEntry = null;
-        String radioId = blockEntity.getRadioId();
         if (radioId != null && !radioId.isBlank()) {
             queueEntry = ClientMediaRepository.getInstance().getCurrentQueueEntryForRadioId(radioId);
         }
 
         PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
-                blockEntity.getMediaUrl(),
-                blockEntity.getMediaTitle(),
-                blockEntity.getMediaArtist(),
-                blockEntity.getMediaThumbnail(),
+                mediaUrl,
+                mediaTitle,
+                mediaArtist,
+                mediaThumbnail,
                 queueEntry
         );
 
         String title = safe(displayInfo.title(), "No Media");
         String artist = safe(displayInfo.artist(), "Unknown Artist");
-        String status = blockEntity.isPlaying() ? "PLAY" : "PAUSE";
-        String time = formatTime(blockEntity.getPlaybackPositionMs());
-        String volume = (int) (Math.max(0f, Math.min(2f, blockEntity.getVolume())) * 100f) + "%";
+        String status = playing ? "PLAY" : "PAUSE";
+        String time = formatTime(playbackPositionMs);
+        String volume = (int) (Math.max(0f, Math.min(2f, volumeLevel)) * 100f) + "%";
         String clockAndVolume = time + " " + volume;
-        String thumbnailUrl = MediaMetadataResolver.bestThumbnail(displayInfo.thumbnail(), blockEntity.getMediaUrl());
+        String thumbnailUrl = MediaMetadataResolver.bestThumbnail(displayInfo.thumbnail(), mediaUrl);
         var thumbnailTexture = ThumbnailTextureManager.getInstance().getTexture(thumbnailUrl);
 
         int panelWidth = PANEL_WIDTH;
@@ -103,7 +134,6 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
             infoLines.remove(infoLines.size() - 1);
         }
 
-        BlockState blockState = blockEntity.getBlockState();
         Direction facing = blockState.hasProperty(RadioBlock.FACING)
                 ? blockState.getValue(RadioBlock.FACING)
                 : Direction.NORTH;
@@ -122,7 +152,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         poseStack.popPose();
     }
 
-    private void addWrapped(List<DisplayLine> output, Font font, String text, int wrapWidth, int color, int maxLines) {
+    private static void addWrapped(List<DisplayLine> output, Font font, String text, int wrapWidth, int color, int maxLines) {
         List<FormattedCharSequence> wrapped = font.split(Component.literal(text), Math.max(12, wrapWidth));
         if (wrapped.isEmpty()) {
             wrapped = List.of(FormattedCharSequence.EMPTY);
@@ -134,13 +164,13 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         }
     }
 
-    private void drawSingleLine(PoseStack poseStack, MultiBufferSource bufferSource, Font font, String value, int x, int y, int color, int packedLight, int wrapWidth) {
+    private static void drawSingleLine(PoseStack poseStack, MultiBufferSource bufferSource, Font font, String value, int x, int y, int color, int packedLight, int wrapWidth) {
         List<FormattedCharSequence> wrapped = font.split(Component.literal(value), Math.max(12, wrapWidth));
         FormattedCharSequence line = wrapped.isEmpty() ? FormattedCharSequence.EMPTY : wrapped.get(0);
         font.drawInBatch(line, x, y, color, true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
     }
 
-    private void drawLines(PoseStack poseStack, MultiBufferSource bufferSource, Font font, List<DisplayLine> lines, int textX, int startY, int packedLight) {
+    private static void drawLines(PoseStack poseStack, MultiBufferSource bufferSource, Font font, List<DisplayLine> lines, int textX, int startY, int packedLight) {
         for (int i = 0; i < lines.size(); i++) {
             DisplayLine line = lines.get(i);
             float y = startY + (i * LINE_HEIGHT);
@@ -148,7 +178,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         }
     }
 
-    private void drawPanel(PoseStack poseStack, MultiBufferSource bufferSource, int x, int y, int width, int height) {
+    private static void drawPanel(PoseStack poseStack, MultiBufferSource bufferSource, int x, int y, int width, int height) {
         VertexConsumer consumer = bufferSource.getBuffer(RenderType.debugQuads());
         var matrix = poseStack.last().pose();
         int a = (PANEL_BG_COLOR >> 24) & 0xFF;
@@ -163,7 +193,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         consumer.vertex(matrix, x, y, z).color(r, g, b, a).endVertex();
     }
 
-    private void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, Font font, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
+    private static void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, Font font, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
         if (texture == null || texture.location() == null) {
             drawMissingThumbnailPlaceholder(poseStack, bufferSource, font, x, y, width, height, packedLight);
             return;
@@ -207,7 +237,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         consumer.vertex(matrix, left, top, z).color(255, 255, 255, 255).uv(0f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
     }
 
-    private void drawMissingThumbnailPlaceholder(PoseStack poseStack, MultiBufferSource bufferSource, Font font, int x, int y, int width, int height, int packedLight) {
+    private static void drawMissingThumbnailPlaceholder(PoseStack poseStack, MultiBufferSource bufferSource, Font font, int x, int y, int width, int height, int packedLight) {
         int centerX = x + (width / 2);
         int centerY = y + (height / 2) - 4;
         String marker = "?";
@@ -226,14 +256,14 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         );
     }
 
-    private String safe(String value, String fallback) {
+    private static String safe(String value, String fallback) {
         if (value == null || value.isBlank()) {
             return fallback;
         }
         return value;
     }
 
-    private String formatTime(long millis) {
+    private static String formatTime(long millis) {
         long totalSeconds = Math.max(0L, millis / 1000L);
         long hours = totalSeconds / 3600L;
         long minutes = (totalSeconds % 3600L) / 60L;

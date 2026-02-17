@@ -132,6 +132,10 @@ public class RadioAudioChannel {
         return sourceId != -1 && alGetSourcei(sourceId, AL_SOURCE_STATE) == AL_PLAYING;
     }
 
+    public boolean isPositional() {
+        return spatial;
+    }
+
     public void play(String url, long startPositionMs) {
         stopInternal(false);
         currentUrl = url == null ? "" : url;

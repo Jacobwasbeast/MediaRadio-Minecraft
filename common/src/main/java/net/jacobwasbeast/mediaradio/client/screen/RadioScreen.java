@@ -65,6 +65,9 @@ public class RadioScreen extends Screen {
 
     private final BlockPos blockPos;
     private final InteractionHand hand;
+    private final String fixedBlockRadioId;
+    private final int contraptionEntityId;
+    private final BlockPos contraptionLocalPos;
 
     private Tab tab = Tab.NOW;
     private LibraryView libraryView = LibraryView.BROWSE;
@@ -124,18 +127,25 @@ public class RadioScreen extends Screen {
     private boolean playlistImportLoading;
     private String playlistImportStatus = "Pick an import source to begin.";
 
-    private RadioScreen(BlockPos blockPos, InteractionHand hand) {
+    private RadioScreen(BlockPos blockPos, InteractionHand hand, String fixedBlockRadioId, int contraptionEntityId, BlockPos contraptionLocalPos) {
         super(Component.literal("Media Radio"));
         this.blockPos = blockPos;
         this.hand = hand;
+        this.fixedBlockRadioId = fixedBlockRadioId == null ? "" : fixedBlockRadioId;
+        this.contraptionEntityId = contraptionEntityId;
+        this.contraptionLocalPos = contraptionLocalPos;
     }
 
     public static RadioScreen forHand(InteractionHand hand) {
-        return new RadioScreen(null, hand);
+        return new RadioScreen(null, hand, "", -1, null);
     }
 
     public static RadioScreen forBlock(BlockPos blockPos) {
-        return new RadioScreen(blockPos, null);
+        return new RadioScreen(blockPos, null, "", -1, null);
+    }
+
+    public static RadioScreen forContraptionRadio(String radioId, int contraptionEntityId, BlockPos localPos) {
+        return new RadioScreen(null, null, radioId, contraptionEntityId, localPos);
     }
 
     @Override
@@ -154,6 +164,9 @@ public class RadioScreen extends Screen {
                 blockVolume = blockEntity.getVolume();
             }
             syncBlockRadioContext();
+            if (!fixedBlockRadioId.isBlank()) {
+                ClientAudioEngine.getInstance().setExternalContext(fixedBlockRadioId, contraptionEntityId, contraptionLocalPos);
+            }
         }
 
         clampSelections();
@@ -163,6 +176,9 @@ public class RadioScreen extends Screen {
     private String resolveActiveRadioId() {
         Minecraft minecraft = Minecraft.getInstance();
         if (isBlockMode()) {
+            if (!fixedBlockRadioId.isBlank()) {
+                return fixedBlockRadioId;
+            }
             RadioBlockEntity blockEntity = getBlockEntity();
             if (blockEntity != null && blockEntity.getRadioId() != null && !blockEntity.getRadioId().isBlank()) {
                 return blockEntity.getRadioId();
@@ -1350,16 +1366,7 @@ public class RadioScreen extends Screen {
         String safeThumbnail = thumbnail == null ? "" : thumbnail;
 
         if (isBlockMode()) {
-            ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                    blockPos,
-                    ServerboundRadioControlMessage.Action.PLAY_URL,
-                    url,
-                    displayTitle,
-                    safeArtist,
-                    safeThumbnail,
-                    blockVolume,
-                    0L
-            ));
+            sendBlockRadioControl(ServerboundRadioControlMessage.Action.PLAY_URL, url, displayTitle, safeArtist, safeThumbnail, 0L);
         } else {
             ClientAudioEngine.getInstance().playHandheld(url, 0L, hand, displayTitle, safeArtist, safeThumbnail);
         }
@@ -1367,16 +1374,7 @@ public class RadioScreen extends Screen {
 
     private void stopPlayback() {
         if (isBlockMode()) {
-            ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                    blockPos,
-                    ServerboundRadioControlMessage.Action.STOP,
-                    "",
-                    "",
-                    "",
-                    "",
-                    blockVolume,
-                    0L
-            ));
+            sendBlockRadioControl(ServerboundRadioControlMessage.Action.STOP, "", "", "", "", 0L);
         } else {
             ClientAudioEngine.getInstance().stopHandheld();
             ClientAudioEngine.getInstance().clearHandheldState();
@@ -1386,16 +1384,7 @@ public class RadioScreen extends Screen {
 
     private void togglePause() {
         if (isBlockMode()) {
-            ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                    blockPos,
-                    ServerboundRadioControlMessage.Action.TOGGLE_PAUSE,
-                    "",
-                    "",
-                    "",
-                    "",
-                    blockVolume,
-                    0L
-            ));
+            sendBlockRadioControl(ServerboundRadioControlMessage.Action.TOGGLE_PAUSE, "", "", "", "", 0L);
         } else {
             ClientAudioEngine.getInstance().togglePauseHandheld();
         }
@@ -1790,9 +1779,17 @@ public class RadioScreen extends Screen {
 
         if (isBlockMode()) {
             RadioBlockEntity blockEntity = getBlockEntity();
-            return blockEntity != null
-                    && removedEntry.url.equals(blockEntity.getMediaUrl())
-                    && (blockEntity.isPlaying() || blockEntity.getPlaybackPositionMs() > 0L);
+            if (blockEntity != null) {
+                return removedEntry.url.equals(blockEntity.getMediaUrl())
+                        && (blockEntity.isPlaying() || blockEntity.getPlaybackPositionMs() > 0L);
+            }
+            String radioId = getTargetBlockRadioId();
+            ClientAudioEngine.HandheldRenderState state = radioId.isBlank()
+                    ? null
+                    : ClientAudioEngine.getInstance().getRenderStateForRadioId(radioId);
+            return state != null
+                    && removedEntry.url.equals(state.url())
+                    && (state.playing() || state.paused() || state.positionMs() > 0L);
         }
 
         ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
@@ -1835,16 +1832,14 @@ public class RadioScreen extends Screen {
             ensureQueueCurrent(entry);
         }
         if (isBlockMode()) {
-            ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                    blockPos,
+            sendBlockRadioControl(
                     ServerboundRadioControlMessage.Action.PLAY_URL,
                     entry.url,
                     entry.title,
                     entry.artist,
                     entry.thumbnail,
-                    blockVolume,
                     0L
-            ));
+            );
         } else {
             ClientAudioEngine.getInstance().playHandheld(entry.url, 0L, hand, entry.title, entry.artist, entry.thumbnail);
         }
@@ -1908,16 +1903,14 @@ public class RadioScreen extends Screen {
                 }
 
                 if (isBlockMode()) {
-                    ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                            blockPos,
+                    sendBlockRadioControl(
                             ServerboundRadioControlMessage.Action.UPDATE_METADATA,
                             finalUrl,
                             resolved.title(),
                             resolved.artist(),
                             resolved.thumbnail(),
-                            blockVolume,
                             0L
-                    ));
+                    );
                 } else {
                     ClientAudioEngine.getInstance().updateHandheldMetadata(resolved.title(), resolved.artist(), resolved.thumbnail());
                 }
@@ -2004,16 +1997,7 @@ public class RadioScreen extends Screen {
         float newVolume = Math.max(0f, Math.min(2f, getVolume() + delta));
         if (isBlockMode()) {
             blockVolume = newVolume;
-            ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                    blockPos,
-                    ServerboundRadioControlMessage.Action.SET_VOLUME,
-                    "",
-                    "",
-                    "",
-                    "",
-                    blockVolume,
-                    0L
-            ));
+            sendBlockRadioControl(ServerboundRadioControlMessage.Action.SET_VOLUME, "", "", "", "", 0L);
         } else {
             ClientAudioEngine.getInstance().setHandheldVolume(newVolume);
         }
@@ -2135,6 +2119,42 @@ public class RadioScreen extends Screen {
 
     private PlaybackView getPlaybackView() {
         if (isBlockMode()) {
+            String boundRadioId = getTargetBlockRadioId();
+            if (boundRadioId != null && !boundRadioId.isBlank()) {
+                ClientAudioEngine.HandheldRenderState runtime = ClientAudioEngine.getInstance().getRenderStateForRadioId(boundRadioId);
+                SharedMediaSnapshot.MediaEntry queueCurrent = ClientMediaRepository.getInstance().getCurrentQueueEntry();
+                if (runtime != null) {
+                    PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
+                            runtime.url(),
+                            runtime.title(),
+                            runtime.artist(),
+                            runtime.thumbnail(),
+                            queueCurrent
+                    );
+                    String title = displayInfo.title();
+                    if (title == null || title.isBlank()) {
+                        title = "Nothing queued";
+                    }
+                    String state;
+                    if (runtime.playing()) {
+                        state = "Playing";
+                    } else if (runtime.paused()) {
+                        state = "Paused";
+                    } else {
+                        state = "Stopped";
+                    }
+                    return new PlaybackView(
+                            state,
+                            title,
+                            displayInfo.artist(),
+                            displayInfo.thumbnail(),
+                            runtime.positionMs(),
+                            runtime.durationMs(),
+                            runtime.volume()
+                    );
+                }
+            }
+
             RadioBlockEntity blockEntity = getBlockEntity();
             if (blockEntity == null) {
                 return new PlaybackView("Stopped", "No radio data", "", "", 0L, -1L, blockVolume);
@@ -2281,7 +2301,15 @@ public class RadioScreen extends Screen {
 
     private boolean canSeekTimeline() {
         if (isBlockMode()) {
-            return blockPos != null && ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos) > 0L;
+            if (blockPos != null) {
+                return ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos) > 0L;
+            }
+            String boundRadioId = getTargetBlockRadioId();
+            if (boundRadioId == null || boundRadioId.isBlank()) {
+                return false;
+            }
+            ClientAudioEngine.HandheldRenderState state = ClientAudioEngine.getInstance().getRenderStateForRadioId(boundRadioId);
+            return state != null && state.durationMs() > 0L;
         }
         return ClientAudioEngine.getInstance().getHandheldTrackDurationMs() > 0L;
     }
@@ -2295,24 +2323,19 @@ public class RadioScreen extends Screen {
         float pct = (float) ((mouseX - barX) / Math.max(1.0, barW));
         pct = Mth.clamp(pct, 0f, 1f);
         if (isBlockMode()) {
-            if (blockPos == null) {
-                return;
+            long duration;
+            if (blockPos != null) {
+                duration = ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos);
+            } else {
+                String boundRadioId = getTargetBlockRadioId();
+                ClientAudioEngine.HandheldRenderState state = boundRadioId == null ? null : ClientAudioEngine.getInstance().getRenderStateForRadioId(boundRadioId);
+                duration = state == null ? -1L : state.durationMs();
             }
-            long duration = ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos);
             if (duration <= 0L) {
                 return;
             }
             long target = (long) (duration * pct);
-            ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                    blockPos,
-                    ServerboundRadioControlMessage.Action.SEEK,
-                    "",
-                    "",
-                    "",
-                    "",
-                    blockVolume,
-                    target
-            ));
+            sendBlockRadioControl(ServerboundRadioControlMessage.Action.SEEK, "", "", "", "", target);
             return;
         }
         long duration = ClientAudioEngine.getInstance().getHandheldTrackDurationMs();
@@ -2412,7 +2435,7 @@ public class RadioScreen extends Screen {
     }
 
     private boolean isBlockMode() {
-        return blockPos != null;
+        return blockPos != null || !fixedBlockRadioId.isBlank();
     }
 
     public boolean isBlockModeScreen() {
@@ -2437,14 +2460,7 @@ public class RadioScreen extends Screen {
     private void persistRuntimeState() {
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
         if (isBlockMode()) {
-            if (blockPos == null) {
-                return;
-            }
-            RadioBlockEntity blockEntity = getBlockEntity();
-            if (blockEntity == null) {
-                return;
-            }
-            String radioId = blockEntity.getRadioId();
+            String radioId = getTargetBlockRadioId();
             if (radioId == null || radioId.isBlank()) {
                 return;
             }
@@ -2453,16 +2469,7 @@ public class RadioScreen extends Screen {
             }
             String queueStateJson = repository.exportActiveQueueStateJson();
             if (!queueStateJson.equals(lastPersistedQueueState)) {
-                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                        blockPos,
-                        ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
-                        queueStateJson,
-                        "",
-                        "",
-                        "",
-                        blockVolume,
-                        0L
-                ));
+                sendBlockRadioControl(ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE, queueStateJson, "", "", "", 0L);
                 lastPersistedQueueState = queueStateJson;
             }
             return;
@@ -2514,6 +2521,17 @@ public class RadioScreen extends Screen {
             return;
         }
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        if (!fixedBlockRadioId.isBlank()) {
+            if (!fixedBlockRadioId.equals(repository.getActiveRadioId())) {
+                repository.setActiveRadioId(fixedBlockRadioId);
+            }
+            if (!fixedBlockRadioId.equals(lastBoundBlockRadioId)) {
+                lastPersistedQueueState = "";
+                lastBoundBlockRadioId = fixedBlockRadioId;
+                ModNetworking.requestRadioState(fixedBlockRadioId);
+            }
+            return;
+        }
         RadioBlockEntity blockEntity = getBlockEntity();
         if (blockEntity == null) {
             repository.setActiveRadioId(blockContextKey());
@@ -2536,6 +2554,9 @@ public class RadioScreen extends Screen {
     }
 
     private String blockContextKey() {
+        if (!fixedBlockRadioId.isBlank()) {
+            return "contraption:" + fixedBlockRadioId;
+        }
         if (blockPos == null) {
             return "block:unknown";
         }
@@ -2544,6 +2565,59 @@ public class RadioScreen extends Screen {
             return "block:" + minecraft.level.dimension().location() + ":" + blockPos.getX() + "," + blockPos.getY() + "," + blockPos.getZ();
         }
         return "block:" + blockPos.getX() + "," + blockPos.getY() + "," + blockPos.getZ();
+    }
+
+    private String getTargetBlockRadioId() {
+        if (!fixedBlockRadioId.isBlank()) {
+            return fixedBlockRadioId;
+        }
+        RadioBlockEntity blockEntity = getBlockEntity();
+        if (blockEntity == null) {
+            return "";
+        }
+        return blockEntity.getRadioId();
+    }
+
+    private void sendBlockRadioControl(
+            ServerboundRadioControlMessage.Action action,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            long positionMs
+    ) {
+        ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                blockPos,
+                getTargetBlockRadioId(),
+                action,
+                url,
+                title,
+                artist,
+                thumbnail,
+                blockVolume,
+                positionMs
+        ));
+
+        if (fixedBlockRadioId.isBlank()) {
+            return;
+        }
+
+        ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+        audioEngine.setExternalContext(fixedBlockRadioId, contraptionEntityId, contraptionLocalPos);
+        switch (action) {
+            case PLAY_URL -> {
+                String displayTitle = title == null || title.isBlank() ? url : title;
+                audioEngine.playExternal(fixedBlockRadioId, url, Math.max(0L, positionMs), displayTitle, artist, thumbnail);
+            }
+            case UPDATE_METADATA -> audioEngine.updateExternalMetadata(fixedBlockRadioId, title, artist, thumbnail);
+            case TOGGLE_PAUSE -> audioEngine.togglePauseExternal(fixedBlockRadioId);
+            case STOP -> audioEngine.stopExternal(fixedBlockRadioId);
+            case SET_VOLUME -> audioEngine.setExternalVolume(fixedBlockRadioId, blockVolume);
+            case SEEK -> audioEngine.seekExternal(fixedBlockRadioId, positionMs);
+            case UPDATE_QUEUE_STATE -> {
+                // Queue state is already maintained in the shared client repository.
+            }
+        }
     }
 
     private String trim(String value, int maxLength) {

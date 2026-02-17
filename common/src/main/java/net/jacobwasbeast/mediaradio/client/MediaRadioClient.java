@@ -69,6 +69,17 @@ public class MediaRadioClient {
         Minecraft.getInstance().setScreen(RadioScreen.forBlock(blockPos));
     }
 
+    public static void openContraptionRadioScreen(String radioId, int contraptionEntityId, BlockPos localPos) {
+        if (radioId == null || radioId.isBlank()) {
+            return;
+        }
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        repository.setActiveRadioId(radioId);
+        ClientAudioEngine.getInstance().setExternalContext(radioId, contraptionEntityId, localPos);
+        ModNetworking.requestRadioState(radioId);
+        Minecraft.getInstance().setScreen(RadioScreen.forContraptionRadio(radioId, contraptionEntityId, localPos));
+    }
+
     public static void applyServerRadioRuntimeState(
             String radioId,
             String url,
@@ -85,13 +96,23 @@ public class MediaRadioClient {
             return;
         }
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
-        if (radioId == null || radioId.isBlank() || !radioId.equals(repository.getActiveRadioId())) {
+        if (radioId == null || radioId.isBlank()) {
             return;
         }
+        boolean isActiveRadio = radioId.equals(repository.getActiveRadioId());
+        ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+        boolean isExternalRadio = audioEngine.hasExternalContext(radioId);
 
         boolean hasAuthoritativeQueueState = queueStateJson != null && !queueStateJson.isBlank();
-        if (queueStateJson != null && !queueStateJson.isBlank()) {
+        if (hasAuthoritativeQueueState && (isActiveRadio || isExternalRadio)) {
+            String previousActive = repository.getActiveRadioId();
+            if (!radioId.equals(previousActive)) {
+                repository.setActiveRadioId(radioId);
+            }
             repository.importActiveQueueStateJson(queueStateJson);
+            if (!radioId.equals(previousActive)) {
+                repository.setActiveRadioId(previousActive);
+            }
         }
 
         String resolvedUrl = url == null ? "" : url;
@@ -107,11 +128,13 @@ public class MediaRadioClient {
                 mediaId = existing.id;
             }
 
-            List<SharedMediaSnapshot.MediaEntry> queue = repository.getQueueEntries();
+            List<SharedMediaSnapshot.MediaEntry> queue = isActiveRadio ? repository.getQueueEntries() : List.of();
             if (queue.isEmpty()) {
-                repository.enqueue(mediaId);
-                repository.setQueueIndex(0);
-            } else if (!hasAuthoritativeQueueState) {
+                if (isActiveRadio) {
+                    repository.enqueue(mediaId);
+                    repository.setQueueIndex(0);
+                }
+            } else if (!hasAuthoritativeQueueState && isActiveRadio) {
                 int matchingIndex = -1;
                 for (int i = 0; i < queue.size(); i++) {
                     SharedMediaSnapshot.MediaEntry queued = queue.get(i);
@@ -126,12 +149,13 @@ public class MediaRadioClient {
                     repository.enqueue(mediaId);
                     repository.setQueueIndex(Math.max(0, repository.getQueueEntries().size() - 1));
                 }
-            } else if (repository.getCurrentQueueEntry() == null) {
+            } else if (isActiveRadio && repository.getCurrentQueueEntry() == null) {
                 repository.setQueueIndex(0);
             }
         }
 
-        ClientAudioEngine.getInstance().primeHandheldState(
+        audioEngine.primeRuntimeStateForRadio(
+                radioId,
                 resolvedUrl,
                 resolvedTitle,
                 resolvedArtist,

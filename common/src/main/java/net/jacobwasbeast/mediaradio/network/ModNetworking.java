@@ -4,6 +4,7 @@ import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.network.BalmNetworking;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
+import net.jacobwasbeast.mediaradio.network.message.ClientboundOpenContraptionRadioMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
@@ -79,6 +80,25 @@ public class ModNetworking {
                 }
         );
 
+        networking.registerClientboundPacket(
+                MediaRadio.id("open_contraption_radio"),
+                ClientboundOpenContraptionRadioMessage.class,
+                ClientboundOpenContraptionRadioMessage::encode,
+                ClientboundOpenContraptionRadioMessage::new,
+                (player, message) -> {
+                    if (!Balm.getProxy().isClient()) {
+                        return;
+                    }
+                    try {
+                        Class<?> clientClass = Class.forName("net.jacobwasbeast.mediaradio.client.MediaRadioClient");
+                        clientClass.getMethod("openContraptionRadioScreen", String.class, int.class, net.minecraft.core.BlockPos.class)
+                                .invoke(null, message.radioId(), message.contraptionEntityId(), message.localPos());
+                    } catch (Exception exception) {
+                        LOGGER.error("Failed to open contraption radio screen on client", exception);
+                    }
+                }
+        );
+
         networking.registerServerboundPacket(
                 MediaRadio.id("shared_media_upload"),
                 ServerboundSharedMediaMessage.class,
@@ -138,5 +158,9 @@ public class ModNetworking {
 
     public static void sendRadioState(ServerPlayer player, ClientboundRadioStateMessage message) {
         Balm.getNetworking().sendTo(player, message);
+    }
+
+    public static void openContraptionRadioScreen(ServerPlayer player, String radioId, int contraptionEntityId, net.minecraft.core.BlockPos localPos) {
+        Balm.getNetworking().sendTo(player, new ClientboundOpenContraptionRadioMessage(radioId, contraptionEntityId, localPos));
     }
 }
