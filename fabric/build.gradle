@@ -35,7 +35,6 @@ shadowJar {
     relocate 'org.jsoup', "${project.group}.${mod_id}.shadow.org.jsoup"
     relocate 'mozilla', "${project.group}.${mod_id}.shadow.mozilla"
     relocate 'net.iharder', "${project.group}.${mod_id}.shadow.net.iharder"
-    relocate 'com.sedmelluq.lava', "${project.group}.${mod_id}.shadow.com.sedmelluq.lava"
     relocate 'org.apache.http', "${project.group}.${mod_id}.shadow.org.apache.http"
     relocate('org.apache.commons', "${project.group}.${mod_id}.shadow.org.apache.commons") {
         include 'org.apache.commons.logging.**'
@@ -45,9 +44,6 @@ shadowJar {
     relocate 'com.github', "${project.group}.${mod_id}.shadow.com.github"
     relocate 'com.alibaba', "${project.group}.${mod_id}.shadow.com.alibaba"
     relocate 'com.mpatric', "${project.group}.${mod_id}.shadow.com.mpatric"
-    relocate('com.sedmelluq.discord.lavaplayer', "${project.group}.${mod_id}.shadow.com.sedmelluq.discord.lavaplayer") {
-        exclude 'com.sedmelluq.discord.lavaplayer.natives.**'
-    }
 
     mergeServiceFiles {
         relocate 'javax.ws.rs.ext', "${project.group}.${mod_id}.shadow.javax.ws.rs.ext"
@@ -58,7 +54,6 @@ shadowJar {
     relocate 'net.sourceforge.jaad', "${project.group}.${mod_id}.shadow.net.sourceforge.jaad"
     relocate 'org.mozilla.javascript', "${project.group}.${mod_id}.shadow.org.mozilla.javascript"
     relocate 'org.mozilla.classfile', "${project.group}.${mod_id}.shadow.org.mozilla.classfile"
-    relocate 'dev.lavalink.youtube', "${project.group}.${mod_id}.shadow.dev.lavalink.youtube"
 }
 
 loom {
