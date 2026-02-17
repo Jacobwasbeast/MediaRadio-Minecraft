@@ -115,6 +115,8 @@ public class RadioScreen extends Screen {
     private StyledButton loopModeButton;
     private StyledButton playlistAccessButton;
     private boolean timelineDragging;
+    private long timelinePreviewPositionMs = -1L;
+    private long lastKnownDurationMs = -1L;
     private String lastPersistedQueueState = "";
     private String lastPersistedRuntimeKey = "";
     private String lastBoundBlockRadioId = "";
@@ -877,8 +879,10 @@ public class RadioScreen extends Screen {
                 && mouseX >= nowTimelineX() && mouseX <= nowTimelineX() + nowTimelineW()
                 && mouseY >= nowTimelineY() && mouseY <= nowTimelineY() + nowTimelineH()) {
             timelineDragging = true;
+            updateTimelinePreview(mouseX);
             return true;
         }
+        timelinePreviewPositionMs = -1L;
 
         if (tab == Tab.NOW) {
             if (mouseX >= nowQueueListX() && mouseX <= nowQueueListX() + nowQueueListW()
@@ -1016,6 +1020,7 @@ public class RadioScreen extends Screen {
     @Override
     public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
         if (timelineDragging && button == 0) {
+            updateTimelinePreview(mouseX);
             return true;
         }
         return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
@@ -1026,8 +1031,10 @@ public class RadioScreen extends Screen {
         if (timelineDragging && button == 0) {
             seekFromTimelineMouse(mouseX);
             timelineDragging = false;
+            timelinePreviewPositionMs = -1L;
             return true;
         }
+        timelinePreviewPositionMs = -1L;
         return super.mouseReleased(mouseX, mouseY, button);
     }
 
@@ -1379,6 +1386,8 @@ public class RadioScreen extends Screen {
             ClientAudioEngine.getInstance().stopHandheld();
             ClientAudioEngine.getInstance().clearHandheldState();
         }
+        timelinePreviewPositionMs = -1L;
+        lastKnownDurationMs = -1L;
         persistRuntimeState();
     }
 
@@ -2118,6 +2127,7 @@ public class RadioScreen extends Screen {
     }
 
     private PlaybackView getPlaybackView() {
+        PlaybackView playbackView;
         if (isBlockMode()) {
             String boundRadioId = getTargetBlockRadioId();
             if (boundRadioId != null && !boundRadioId.isBlank()) {
@@ -2143,7 +2153,7 @@ public class RadioScreen extends Screen {
                     } else {
                         state = "Stopped";
                     }
-                    return new PlaybackView(
+                    playbackView = new PlaybackView(
                             state,
                             title,
                             displayInfo.artist(),
@@ -2152,12 +2162,14 @@ public class RadioScreen extends Screen {
                             runtime.durationMs(),
                             runtime.volume()
                     );
+                    return finalizePlaybackView(playbackView);
                 }
             }
 
             RadioBlockEntity blockEntity = getBlockEntity();
             if (blockEntity == null) {
-                return new PlaybackView("Stopped", "No radio data", "", "", 0L, -1L, blockVolume);
+                playbackView = new PlaybackView("Stopped", "No radio data", "", "", 0L, -1L, blockVolume);
+                return finalizePlaybackView(playbackView);
             }
 
             String title = blockEntity.getMediaTitle();
@@ -2175,7 +2187,7 @@ public class RadioScreen extends Screen {
             long channelPositionMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockPlaybackPositionMs(blockPos);
             long channelDurationMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos);
             long positionMs = channelPositionMs >= 0L ? channelPositionMs : blockEntity.getPlaybackPositionMs();
-            return new PlaybackView(
+            playbackView = new PlaybackView(
                     state,
                     displayInfo.title(),
                     displayInfo.artist(),
@@ -2184,6 +2196,7 @@ public class RadioScreen extends Screen {
                     channelDurationMs,
                     blockEntity.getVolume()
             );
+            return finalizePlaybackView(playbackView);
         }
 
         ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
@@ -2208,7 +2221,7 @@ public class RadioScreen extends Screen {
             state = "Stopped";
         }
 
-        return new PlaybackView(
+        playbackView = new PlaybackView(
                 state,
                 title,
                 displayInfo.artist(),
@@ -2216,6 +2229,38 @@ public class RadioScreen extends Screen {
                 audioEngine.getHandheldPlaybackPositionMs(),
                 audioEngine.getHandheldTrackDurationMs(),
                 audioEngine.getHandheldVolume()
+        );
+        return finalizePlaybackView(playbackView);
+    }
+
+    private PlaybackView finalizePlaybackView(PlaybackView base) {
+        long duration = base.durationMs();
+        if (duration > 0L) {
+            lastKnownDurationMs = duration;
+        } else if (!"Stopped".equals(base.state()) && lastKnownDurationMs > 0L) {
+            duration = lastKnownDurationMs;
+        }
+
+        long position = Math.max(0L, base.positionMs());
+        if (timelineDragging && timelinePreviewPositionMs >= 0L) {
+            position = timelinePreviewPositionMs;
+        }
+
+        if (duration > 0L) {
+            position = Math.min(position, duration);
+        }
+
+        if (duration == base.durationMs() && position == base.positionMs()) {
+            return base;
+        }
+        return new PlaybackView(
+                base.state(),
+                base.title(),
+                base.artist(),
+                base.thumbnail(),
+                position,
+                duration,
+                base.volume()
         );
     }
 
@@ -2288,6 +2333,7 @@ public class RadioScreen extends Screen {
         drawOutline(guiGraphics, barX, barY, barW, barH, 0x88597C98);
 
         if (playback.durationMs() <= 0L) {
+            guiGraphics.fill(barX + 1, barY + 1, barX + 2, barY + barH - 1, 0xCC4FA2CB);
             return;
         }
 
@@ -2300,46 +2346,39 @@ public class RadioScreen extends Screen {
     }
 
     private boolean canSeekTimeline() {
-        if (isBlockMode()) {
-            if (blockPos != null) {
-                return ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos) > 0L;
-            }
-            String boundRadioId = getTargetBlockRadioId();
-            if (boundRadioId == null || boundRadioId.isBlank()) {
-                return false;
-            }
-            ClientAudioEngine.HandheldRenderState state = ClientAudioEngine.getInstance().getRenderStateForRadioId(boundRadioId);
-            return state != null && state.durationMs() > 0L;
-        }
-        return ClientAudioEngine.getInstance().getHandheldTrackDurationMs() > 0L;
+        return getPlaybackView().durationMs() > 0L;
     }
 
     private void seekFromTimelineMouse(double mouseX) {
-        if (!canSeekTimeline()) {
+        PlaybackView playback = getPlaybackView();
+        long duration = playback.durationMs();
+        if (duration <= 0L) {
             return;
         }
         int barX = nowTimelineX();
         int barW = nowTimelineW();
         float pct = (float) ((mouseX - barX) / Math.max(1.0, barW));
         pct = Mth.clamp(pct, 0f, 1f);
+        long target = (long) (duration * pct);
         if (isBlockMode()) {
-            long duration;
-            if (blockPos != null) {
-                duration = ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos);
-            } else {
-                String boundRadioId = getTargetBlockRadioId();
-                ClientAudioEngine.HandheldRenderState state = boundRadioId == null ? null : ClientAudioEngine.getInstance().getRenderStateForRadioId(boundRadioId);
-                duration = state == null ? -1L : state.durationMs();
-            }
-            if (duration <= 0L) {
-                return;
-            }
-            long target = (long) (duration * pct);
             sendBlockRadioControl(ServerboundRadioControlMessage.Action.SEEK, "", "", "", "", target);
             return;
         }
-        long duration = ClientAudioEngine.getInstance().getHandheldTrackDurationMs();
-        ClientAudioEngine.getInstance().seekHandheld((long) (duration * pct));
+        ClientAudioEngine.getInstance().seekHandheld(target);
+    }
+
+    private void updateTimelinePreview(double mouseX) {
+        PlaybackView playback = getPlaybackView();
+        long duration = playback.durationMs();
+        if (duration <= 0L) {
+            timelinePreviewPositionMs = -1L;
+            return;
+        }
+        int barX = nowTimelineX();
+        int barW = nowTimelineW();
+        float pct = (float) ((mouseX - barX) / Math.max(1.0, barW));
+        pct = Mth.clamp(pct, 0f, 1f);
+        timelinePreviewPositionMs = (long) (duration * pct);
     }
 
     private int nowRightPanelX() {
