@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 
 public final class RadioItemModelOverlayRenderer {
+    private static final ResourceLocation WHITE_TEXTURE = new ResourceLocation("minecraft", "textures/misc/white.png");
     private static final int PANEL_WIDTH = 96;
     private static final int PANEL_HEIGHT = 78;
     private static final int LINE_HEIGHT = 10;
@@ -130,7 +131,7 @@ public final class RadioItemModelOverlayRenderer {
         poseStack.mulPose(Axis.YP.rotationDegrees(180f));
         poseStack.scale(scaleX, -scaleY, scaleX);
 
-        drawPanel(poseStack, bufferSource, panelLeft, panelTop, PANEL_WIDTH, PANEL_HEIGHT);
+        drawPanel(poseStack, bufferSource, panelLeft, panelTop, PANEL_WIDTH, PANEL_HEIGHT, packedLight);
         drawThumbnail(poseStack, bufferSource, font, thumbnailTexture, thumbX, thumbY, thumbW, thumbH, packedLight);
         drawSingleLine(poseStack, bufferSource, font, status, topTextX, innerTop, 0xFF66C7, packedLight, topTextWrap);
         drawSingleLine(poseStack, bufferSource, font, clockAndVolume, topTextX, innerTop + LINE_HEIGHT, 0x82F1C3, packedLight, topTextWrap);
@@ -153,30 +154,31 @@ public final class RadioItemModelOverlayRenderer {
     private static void drawSingleLine(PoseStack poseStack, MultiBufferSource bufferSource, Font font, String value, int x, int y, int color, int packedLight, int wrapWidth) {
         List<FormattedCharSequence> wrapped = font.split(Component.literal(value), Math.max(12, wrapWidth));
         FormattedCharSequence line = wrapped.isEmpty() ? FormattedCharSequence.EMPTY : wrapped.get(0);
-        font.drawInBatch(line, x, y, color, true, poseStack.last().pose(), bufferSource, Font.DisplayMode.SEE_THROUGH, 0, packedLight);
+        font.drawInBatch(line, x, y, color, true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
     }
 
     private static void drawLines(PoseStack poseStack, MultiBufferSource bufferSource, Font font, List<DisplayLine> lines, int textX, int startY, int packedLight) {
         for (int i = 0; i < lines.size(); i++) {
             DisplayLine line = lines.get(i);
             float y = startY + (i * LINE_HEIGHT);
-            font.drawInBatch(line.text(), textX, y, line.color(), true, poseStack.last().pose(), bufferSource, Font.DisplayMode.SEE_THROUGH, 0, packedLight);
+            font.drawInBatch(line.text(), textX, y, line.color(), true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
         }
     }
 
-    private static void drawPanel(PoseStack poseStack, MultiBufferSource bufferSource, int x, int y, int width, int height) {
-        VertexConsumer consumer = bufferSource.getBuffer(RenderType.debugQuads());
+    private static void drawPanel(PoseStack poseStack, MultiBufferSource bufferSource, int x, int y, int width, int height, int packedLight) {
+        VertexConsumer consumer = bufferSource.getBuffer(RenderType.entityTranslucent(WHITE_TEXTURE));
         var matrix = poseStack.last().pose();
+        var normal = poseStack.last().normal();
         int a = (PANEL_BG_COLOR >> 24) & 0xFF;
         int r = (PANEL_BG_COLOR >> 16) & 0xFF;
         int g = (PANEL_BG_COLOR >> 8) & 0xFF;
         int b = PANEL_BG_COLOR & 0xFF;
 
         float z = 0.0f;
-        consumer.vertex(matrix, x, y + height, z).color(r, g, b, a).endVertex();
-        consumer.vertex(matrix, x + width, y + height, z).color(r, g, b, a).endVertex();
-        consumer.vertex(matrix, x + width, y, z).color(r, g, b, a).endVertex();
-        consumer.vertex(matrix, x, y, z).color(r, g, b, a).endVertex();
+        consumer.vertex(matrix, x, y + height, z).color(r, g, b, a).uv(0f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.vertex(matrix, x + width, y + height, z).color(r, g, b, a).uv(1f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.vertex(matrix, x + width, y, z).color(r, g, b, a).uv(1f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.vertex(matrix, x, y, z).color(r, g, b, a).uv(0f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
     }
 
     private static void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, Font font, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
@@ -206,7 +208,7 @@ public final class RadioItemModelOverlayRenderer {
         float bottom = drawY + drawH;
 
         ResourceLocation target = texture.location();
-        RenderType renderType = RenderType.entityCutoutNoCull(target);
+        RenderType renderType = RenderType.entityCutout(target);
         VertexConsumer consumer = bufferSource.getBuffer(renderType);
         var matrix = poseStack.last().pose();
         var normal = poseStack.last().normal();
@@ -231,7 +233,7 @@ public final class RadioItemModelOverlayRenderer {
                 false,
                 poseStack.last().pose(),
                 bufferSource,
-                Font.DisplayMode.SEE_THROUGH,
+                Font.DisplayMode.POLYGON_OFFSET,
                 0,
                 packedLight
         );

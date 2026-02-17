@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Locale;
 
 public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockEntity> {
+    private static final ResourceLocation WHITE_TEXTURE = new ResourceLocation("minecraft", "textures/misc/white.png");
     private static final float SCREEN_X_OFFSET = -0.225f;
     private static final float SCREEN_Y_OFFSET = -0.10f;
     private static final float SCREEN_Z_OFFSET = 0.355f;
@@ -144,7 +145,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         poseStack.translate(SCREEN_X_OFFSET, SCREEN_Y_OFFSET, SCREEN_Z_OFFSET);
         poseStack.scale(SCREEN_SCALE, -SCREEN_SCALE, SCREEN_SCALE);
 
-        drawPanel(poseStack, bufferSource, panelLeft, panelTop, panelWidth, panelHeight);
+        drawPanel(poseStack, bufferSource, panelLeft, panelTop, panelWidth, panelHeight, packedLight);
         drawThumbnail(poseStack, bufferSource, font, thumbnailTexture, thumbX, thumbY, thumbW, thumbH, packedLight);
         drawSingleLine(poseStack, bufferSource, font, status, topTextX, innerTop, 0xFF66C7, packedLight, topTextWrap);
         drawSingleLine(poseStack, bufferSource, font, clockAndVolume, topTextX, innerTop + LINE_HEIGHT, 0x82F1C3, packedLight, topTextWrap);
@@ -178,19 +179,20 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         }
     }
 
-    private static void drawPanel(PoseStack poseStack, MultiBufferSource bufferSource, int x, int y, int width, int height) {
-        VertexConsumer consumer = bufferSource.getBuffer(RenderType.debugQuads());
+    private static void drawPanel(PoseStack poseStack, MultiBufferSource bufferSource, int x, int y, int width, int height, int packedLight) {
+        VertexConsumer consumer = bufferSource.getBuffer(RenderType.entityTranslucent(WHITE_TEXTURE));
         var matrix = poseStack.last().pose();
+        var normal = poseStack.last().normal();
         int a = (PANEL_BG_COLOR >> 24) & 0xFF;
         int r = (PANEL_BG_COLOR >> 16) & 0xFF;
         int g = (PANEL_BG_COLOR >> 8) & 0xFF;
         int b = PANEL_BG_COLOR & 0xFF;
         float z = -0.02f;
 
-        consumer.vertex(matrix, x, y + height, z).color(r, g, b, a).endVertex();
-        consumer.vertex(matrix, x + width, y + height, z).color(r, g, b, a).endVertex();
-        consumer.vertex(matrix, x + width, y, z).color(r, g, b, a).endVertex();
-        consumer.vertex(matrix, x, y, z).color(r, g, b, a).endVertex();
+        consumer.vertex(matrix, x, y + height, z).color(r, g, b, a).uv(0f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.vertex(matrix, x + width, y + height, z).color(r, g, b, a).uv(1f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.vertex(matrix, x + width, y, z).color(r, g, b, a).uv(1f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.vertex(matrix, x, y, z).color(r, g, b, a).uv(0f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
     }
 
     private static void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, Font font, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
@@ -221,16 +223,15 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         float bottom = drawY + drawH;
 
         ResourceLocation target = texture.location();
-        // Depth-tested layer so the thumbnail is correctly occluded by world geometry.
-        RenderType renderType = RenderType.entityCutoutNoCull(target);
+        // Depth-tested + culled front face so the thumbnail cannot bleed through geometry at grazing angles.
+        RenderType renderType = RenderType.entityCutout(target);
         VertexConsumer consumer = bufferSource.getBuffer(renderType);
         var matrix = poseStack.last().pose();
         var normal = poseStack.last().normal();
         // Slight positive depth bias so thumbnail consistently renders above the panel background.
         float z = 0.01f;
 
-        // Single face only; RenderType.entityCutoutNoCull already disables culling.
-        // Drawing both front and back on the same plane causes z-fighting flicker.
+        // Single front face only. Drawing both sides on one plane causes z-fighting/flicker.
         consumer.vertex(matrix, left, bottom, z).color(255, 255, 255, 255).uv(0f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
         consumer.vertex(matrix, right, bottom, z).color(255, 255, 255, 255).uv(1f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
         consumer.vertex(matrix, right, top, z).color(255, 255, 255, 255).uv(1f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
