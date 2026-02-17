@@ -87,6 +87,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
             String queueStateJson,
             float volume,
             long positionMs,
+            int seekSerial,
             boolean playing
     ) {
         RadioRuntimeState state = getOrCreate(radioId);
@@ -97,6 +98,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
         state.queueStateJson = safe(queueStateJson);
         state.volume = Mth.clamp(volume, 0f, 2f);
         state.positionMs = Math.max(0L, positionMs);
+        state.seekSerial = Math.max(0, seekSerial);
         state.playing = playing;
         state.updatedAtMs = System.currentTimeMillis();
         setDirty();
@@ -110,6 +112,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
         public String queueStateJson = "";
         public float volume = 1.0f;
         public long positionMs = 0L;
+        public int seekSerial = 0;
         public boolean playing = false;
         public long updatedAtMs = 0L;
 
@@ -121,6 +124,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
             queueStateJson = safe(queueStateJson);
             volume = Mth.clamp(volume, 0f, 2f);
             positionMs = Math.max(0L, positionMs);
+            seekSerial = Math.max(0, seekSerial);
             updatedAtMs = Math.max(0L, updatedAtMs);
         }
     }

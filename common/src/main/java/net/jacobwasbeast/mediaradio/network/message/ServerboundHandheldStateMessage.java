@@ -11,6 +11,7 @@ public record ServerboundHandheldStateMessage(
         String queueStateJson,
         float volume,
         long positionMs,
+        int seekSerial,
         boolean playing
 ) {
     private static final int MAX_PACKET_STRING = 262144;
@@ -27,6 +28,7 @@ public record ServerboundHandheldStateMessage(
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readFloat(),
                 friendlyByteBuf.readLong(),
+                friendlyByteBuf.readVarInt(),
                 friendlyByteBuf.readBoolean()
         );
     }
@@ -40,6 +42,7 @@ public record ServerboundHandheldStateMessage(
         friendlyByteBuf.writeUtf(queueStateJson, MAX_PACKET_STRING);
         friendlyByteBuf.writeFloat(volume);
         friendlyByteBuf.writeLong(positionMs);
+        friendlyByteBuf.writeVarInt(Math.max(0, seekSerial));
         friendlyByteBuf.writeBoolean(playing);
     }
 }

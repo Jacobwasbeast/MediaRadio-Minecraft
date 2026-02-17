@@ -13,23 +13,27 @@ public class RadioBlockEntity extends BlockEntity {
 
     public static final String TAG_MEDIA_URL = "MediaUrl";
     public static final String TAG_RADIO_ID = "RadioId";
+    public static final String TAG_OWNER_ID = "OwnerId";
     public static final String TAG_MEDIA_TITLE = "MediaTitle";
     public static final String TAG_MEDIA_ARTIST = "MediaArtist";
     public static final String TAG_MEDIA_THUMBNAIL = "MediaThumbnail";
     public static final String TAG_PLAYING = "Playing";
     public static final String TAG_STARTED_AT = "StartedAtEpochMs";
     public static final String TAG_PAUSED_POSITION = "PausedPositionMs";
+    public static final String TAG_SEEK_VERSION = "SeekVersion";
     public static final String TAG_VOLUME = "Volume";
     public static final String TAG_QUEUE_STATE = "QueueStateJson";
 
     private String mediaUrl = "";
     private String radioId = "";
+    private String ownerId = "";
     private String mediaTitle = "";
     private String mediaArtist = "";
     private String mediaThumbnail = "";
     private boolean playing;
     private long startedAtEpochMs;
     private long pausedPositionMs;
+    private int seekVersion;
     private float volume = 1.0f;
     private String queueStateJson = "";
 
@@ -47,6 +51,15 @@ public class RadioBlockEntity extends BlockEntity {
 
     public void setRadioId(String radioId) {
         this.radioId = safe(radioId);
+        sync();
+    }
+
+    public String getOwnerId() {
+        return ownerId == null ? "" : ownerId;
+    }
+
+    public void setOwnerId(String ownerId) {
+        this.ownerId = safe(ownerId);
         sync();
     }
 
@@ -72,6 +85,10 @@ public class RadioBlockEntity extends BlockEntity {
 
     public long getPausedPositionMs() {
         return pausedPositionMs;
+    }
+
+    public int getSeekVersion() {
+        return seekVersion;
     }
 
     public long getPlaybackPositionMs() {
@@ -147,6 +164,7 @@ public class RadioBlockEntity extends BlockEntity {
         } else {
             this.pausedPositionMs = clamped;
         }
+        this.seekVersion++;
         sync();
     }
 
@@ -161,6 +179,7 @@ public class RadioBlockEntity extends BlockEntity {
     protected void saveAdditional(CompoundTag tag) {
         super.saveAdditional(tag);
         tag.putString(TAG_RADIO_ID, radioId);
+        tag.putString(TAG_OWNER_ID, ownerId);
         tag.putString(TAG_MEDIA_URL, mediaUrl);
         tag.putString(TAG_MEDIA_TITLE, mediaTitle);
         tag.putString(TAG_MEDIA_ARTIST, mediaArtist);
@@ -168,6 +187,7 @@ public class RadioBlockEntity extends BlockEntity {
         tag.putBoolean(TAG_PLAYING, playing);
         tag.putLong(TAG_STARTED_AT, startedAtEpochMs);
         tag.putLong(TAG_PAUSED_POSITION, pausedPositionMs);
+        tag.putInt(TAG_SEEK_VERSION, seekVersion);
         tag.putFloat(TAG_VOLUME, volume);
         tag.putString(TAG_QUEUE_STATE, safe(queueStateJson));
     }
@@ -176,6 +196,7 @@ public class RadioBlockEntity extends BlockEntity {
     public void load(CompoundTag tag) {
         super.load(tag);
         radioId = safe(tag.getString(TAG_RADIO_ID));
+        ownerId = safe(tag.getString(TAG_OWNER_ID));
         mediaUrl = safe(tag.getString(TAG_MEDIA_URL));
         mediaTitle = safe(tag.getString(TAG_MEDIA_TITLE));
         mediaArtist = safe(tag.getString(TAG_MEDIA_ARTIST));
@@ -183,6 +204,7 @@ public class RadioBlockEntity extends BlockEntity {
         playing = tag.getBoolean(TAG_PLAYING);
         startedAtEpochMs = tag.getLong(TAG_STARTED_AT);
         pausedPositionMs = tag.getLong(TAG_PAUSED_POSITION);
+        seekVersion = Math.max(0, tag.getInt(TAG_SEEK_VERSION));
         volume = clamp(tag.getFloat(TAG_VOLUME), 0.0f, 2.0f);
         queueStateJson = safe(tag.getString(TAG_QUEUE_STATE));
     }

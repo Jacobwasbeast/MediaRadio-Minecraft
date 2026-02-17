@@ -89,6 +89,9 @@ public class MediaRadioClient {
             String queueStateJson,
             float volume,
             long positionMs,
+            long sentAtMs,
+            boolean forcePositionSync,
+            boolean seekEvent,
             boolean playing
     ) {
         Minecraft minecraft = Minecraft.getInstance();
@@ -154,16 +157,42 @@ public class MediaRadioClient {
             }
         }
 
+        long latencyAdjustedPositionMs = Math.max(0L, positionMs);
+        if (playing) {
+            long ageMs = Math.max(0L, System.currentTimeMillis() - Math.max(0L, sentAtMs));
+            // Guard against clock skew and stale packets.
+            ageMs = Math.min(ageMs, 10_000L);
+            latencyAdjustedPositionMs += ageMs;
+        }
+
         audioEngine.primeRuntimeStateForRadio(
                 radioId,
                 resolvedUrl,
                 resolvedTitle,
                 resolvedArtist,
                 MediaMetadataResolver.bestThumbnail(resolvedThumbnail, resolvedUrl),
-                positionMs,
+                latencyAdjustedPositionMs,
                 volume,
-                playing
+                playing,
+                sentAtMs,
+                forcePositionSync,
+                seekEvent
         );
+    }
+
+    public static void applyServerPlayerRadioContext(String radioId, int entityId, boolean active) {
+        if (radioId == null || radioId.isBlank()) {
+            return;
+        }
+        ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+        if (!active) {
+            audioEngine.releaseExternalContext(radioId);
+            return;
+        }
+        if (entityId <= 0) {
+            return;
+        }
+        audioEngine.setExternalContext(radioId, entityId, null);
     }
 
     private static void registerItemPredicates() {

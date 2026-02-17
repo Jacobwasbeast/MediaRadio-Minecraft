@@ -26,6 +26,8 @@ public class ClientMediaRepository {
 
     private static final ClientMediaRepository INSTANCE = new ClientMediaRepository();
     private static final String DEFAULT_RADIO_ID = "default";
+    private static final long CHUNK_TTL_MS = 30_000L;
+    private static final Map<String, SnapshotChunkAccumulator> SNAPSHOT_CHUNKS = new HashMap<>();
 
     private final Gson gson = new Gson();
     private SharedMediaSnapshot snapshot = new SharedMediaSnapshot();
@@ -41,6 +43,40 @@ public class ClientMediaRepository {
     }
 
     public static void applyServerSnapshot(String json) {
+        INSTANCE.applySnapshotJson(json, true);
+    }
+
+    public static void applyServerSnapshotChunk(String transferId, int chunkIndex, int totalChunks, String chunkData) {
+        if (transferId == null || transferId.isBlank() || chunkData == null) {
+            return;
+        }
+        if (totalChunks <= 0 || totalChunks > 512 || chunkIndex < 0 || chunkIndex >= totalChunks) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        String json;
+        synchronized (SNAPSHOT_CHUNKS) {
+            SNAPSHOT_CHUNKS.entrySet().removeIf(entry -> now - entry.getValue().createdAtMs > CHUNK_TTL_MS);
+            SnapshotChunkAccumulator accumulator = SNAPSHOT_CHUNKS.computeIfAbsent(
+                    transferId,
+                    ignored -> new SnapshotChunkAccumulator(totalChunks, now)
+            );
+            if (accumulator.totalChunks != totalChunks) {
+                SNAPSHOT_CHUNKS.remove(transferId);
+                return;
+            }
+            if (!accumulator.accept(chunkIndex, chunkData, SharedMediaSnapshot.MAX_JSON_LENGTH)) {
+                SNAPSHOT_CHUNKS.remove(transferId);
+                return;
+            }
+            if (!accumulator.complete()) {
+                return;
+            }
+            json = accumulator.join();
+            SNAPSHOT_CHUNKS.remove(transferId);
+        }
+
         INSTANCE.applySnapshotJson(json, true);
     }
 
@@ -909,6 +945,47 @@ public class ClientMediaRepository {
     }
 
     private record PlayerIdentity(String playerId, String playerName) {
+    }
+
+    private static class SnapshotChunkAccumulator {
+        private final int totalChunks;
+        private final String[] chunks;
+        private final long createdAtMs;
+        private int received;
+        private int totalLength;
+
+        private SnapshotChunkAccumulator(int totalChunks, long createdAtMs) {
+            this.totalChunks = totalChunks;
+            this.chunks = new String[totalChunks];
+            this.createdAtMs = createdAtMs;
+        }
+
+        private boolean accept(int index, String chunk, int maxLength) {
+            if (index < 0 || index >= totalChunks) {
+                return false;
+            }
+            if (chunks[index] != null) {
+                return true;
+            }
+            chunks[index] = chunk;
+            received++;
+            totalLength += chunk.length();
+            return totalLength <= maxLength;
+        }
+
+        private boolean complete() {
+            return received == totalChunks;
+        }
+
+        private String join() {
+            StringBuilder builder = new StringBuilder(totalLength);
+            for (String chunk : chunks) {
+                if (chunk != null) {
+                    builder.append(chunk);
+                }
+            }
+            return builder.toString();
+        }
     }
 
     public enum LoopMode {

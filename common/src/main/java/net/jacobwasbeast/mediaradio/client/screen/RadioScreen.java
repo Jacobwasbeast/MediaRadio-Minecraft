@@ -9,7 +9,6 @@ import net.jacobwasbeast.mediaradio.client.media.PlaybackDisplayResolver;
 import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
-import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
@@ -114,6 +113,10 @@ public class RadioScreen extends Screen {
     private StyledButton pauseResumeButton;
     private StyledButton loopModeButton;
     private StyledButton playlistAccessButton;
+    private StyledButton playlistRenameButton;
+    private StyledButton playlistDeleteButton;
+    private StyledButton playlistInviteApplyButton;
+    private StyledButton playlistRemoveSongButton;
     private boolean timelineDragging;
     private long timelinePreviewPositionMs = -1L;
     private long lastKnownDurationMs = -1L;
@@ -241,6 +244,7 @@ public class RadioScreen extends Screen {
 
         clampSelections();
         updatePauseResumeButtonLabel();
+        updatePlaylistBrowseButtonStates();
         persistRuntimeState();
         updatePlaylistAccessButtonLabel();
     }
@@ -441,10 +445,10 @@ public class RadioScreen extends Screen {
 
         StyledButton createButton = new StyledButton(x + w - ((topButtonW * 4) + (topGap * 3)), y, topButtonW, 20, Component.literal("＋ Create"), this::createPlaylist, true, false);
         addRenderableWidget(createButton);
-        StyledButton renameButton = new StyledButton(x + w - ((topButtonW * 3) + (topGap * 2)), y, topButtonW, 20, Component.literal("✎ Rename"), this::renameSelectedPlaylist, false, false);
-        addRenderableWidget(renameButton);
-        StyledButton deleteButton = new StyledButton(x + w - ((topButtonW * 2) + topGap), y, topButtonW, 20, Component.literal("🗑 Delete"), this::deleteSelectedPlaylist, false, false);
-        addRenderableWidget(deleteButton);
+        playlistRenameButton = new StyledButton(x + w - ((topButtonW * 3) + (topGap * 2)), y, topButtonW, 20, Component.literal("✎ Rename"), this::renameSelectedPlaylist, false, false);
+        addRenderableWidget(playlistRenameButton);
+        playlistDeleteButton = new StyledButton(x + w - ((topButtonW * 2) + topGap), y, topButtonW, 20, Component.literal("🗑 Delete"), this::deleteSelectedPlaylist, false, false);
+        addRenderableWidget(playlistDeleteButton);
         StyledButton importButton = new StyledButton(x + w - topButtonW, y, topButtonW, 20, Component.literal("⭳ Import"), this::openPlaylistImportPage, false, false);
         addRenderableWidget(importButton);
 
@@ -452,18 +456,11 @@ public class RadioScreen extends Screen {
         playlistInviteInput.setHint(Component.literal("Invites (comma-separated player names)"));
         playlistInviteInput.setValue(draftPlaylistInvites);
         addRenderableWidget(playlistInviteInput);
-        StyledButton inviteApplyButton = new StyledButton(x + w - 214, y + 26, 106, 20, Component.literal("✓ Set Invites"), this::applyPlaylistInvites, false, false);
-        addRenderableWidget(inviteApplyButton);
+        playlistInviteApplyButton = new StyledButton(x + w - 214, y + 26, 106, 20, Component.literal("✓ Set Invites"), this::applyPlaylistInvites, false, false);
+        addRenderableWidget(playlistInviteApplyButton);
         playlistAccessButton = new StyledButton(x + w - 102, y + 26, 102, 20, Component.literal("Access"), this::cycleSelectedPlaylistAccess, false, false);
         addRenderableWidget(playlistAccessButton);
-
-        boolean canEditSelected = !selectedPlaylistId.isBlank() && ClientMediaRepository.getInstance().canEditPlaylist(selectedPlaylistId);
-        renameButton.active = canEditSelected;
-        deleteButton.active = canEditSelected;
-        inviteApplyButton.active = canEditSelected;
-        if (playlistAccessButton != null) {
-            playlistAccessButton.active = canEditSelected;
-        }
+        updatePlaylistBrowseButtonStates();
         updatePlaylistAccessButtonLabel();
 
         int footerY = panelY + PANEL_HEIGHT - 34;
@@ -473,9 +470,9 @@ public class RadioScreen extends Screen {
         addRenderableWidget(playSongButton);
         StyledButton queueSongButton = new StyledButton(x + 252, footerY, 136, 22, Component.literal("➕ Queue Song"), this::queueSelectedPlaylistTrack, false, false);
         addRenderableWidget(queueSongButton);
-        StyledButton removeSongButton = new StyledButton(x + 394, footerY, 104, 22, Component.literal("✖ Remove"), this::removeSelectedPlaylistTrack, false, false);
-        addRenderableWidget(removeSongButton);
-        removeSongButton.active = canEditSelected;
+        playlistRemoveSongButton = new StyledButton(x + 394, footerY, 104, 22, Component.literal("✖ Remove"), this::removeSelectedPlaylistTrack, false, false);
+        addRenderableWidget(playlistRemoveSongButton);
+        updatePlaylistBrowseButtonStates();
     }
 
     private void buildPlaylistImportPage() {
@@ -1484,7 +1481,7 @@ public class RadioScreen extends Screen {
     }
 
     private void deleteSelectedPlaylist() {
-        if (selectedPlaylistId.isBlank()) {
+        if (selectedPlaylistId.isBlank() || !ClientMediaRepository.getInstance().canEditPlaylist(selectedPlaylistId)) {
             return;
         }
         ClientMediaRepository.getInstance().deletePlaylist(selectedPlaylistId);
@@ -1499,6 +1496,7 @@ public class RadioScreen extends Screen {
         if (playlistInviteInput != null) {
             playlistInviteInput.setValue("");
         }
+        updatePlaylistBrowseButtonStates();
     }
 
     private void playSelectedPlaylist() {
@@ -2323,6 +2321,33 @@ public class RadioScreen extends Screen {
         playlistAccessButton.setMessage(Component.literal("Access: " + access.label()));
     }
 
+    private void updatePlaylistBrowseButtonStates() {
+        if (tab != Tab.PLAYLISTS || playlistPage != PlaylistPage.BROWSE) {
+            return;
+        }
+
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        boolean hasSelectedPlaylist = !selectedPlaylistId.isBlank();
+        boolean canEditSelected = hasSelectedPlaylist && repository.canEditPlaylist(selectedPlaylistId);
+        boolean hasSelectedTrack = selectedPlaylistTrackIndex >= 0 && selectedPlaylistTrackIndex < repository.getPlaylistMedia(selectedPlaylistId).size();
+
+        if (playlistRenameButton != null) {
+            playlistRenameButton.active = canEditSelected;
+        }
+        if (playlistDeleteButton != null) {
+            playlistDeleteButton.active = canEditSelected;
+        }
+        if (playlistInviteApplyButton != null) {
+            playlistInviteApplyButton.active = canEditSelected;
+        }
+        if (playlistAccessButton != null) {
+            playlistAccessButton.active = canEditSelected;
+        }
+        if (playlistRemoveSongButton != null) {
+            playlistRemoveSongButton.active = canEditSelected && hasSelectedTrack;
+        }
+    }
+
     private void drawTimelineBar(GuiGraphics guiGraphics, PlaybackView playback, int x, int y, int width, int height) {
         int barX = nowTimelineX();
         int barY = nowTimelineY();
@@ -2540,18 +2565,8 @@ public class RadioScreen extends Screen {
         if (key.equals(lastPersistedRuntimeKey)) {
             return;
         }
-        String radioId = RadioItem.getOrCreateRadioId(stack);
-        ModNetworking.sendHandheldState(new ServerboundHandheldStateMessage(
-                radioId,
-                resolvedUrl,
-                playbackView.title(),
-                playbackView.artist(),
-                playbackView.thumbnail(),
-                queueStateJson,
-                playbackView.volume(),
-                playbackView.positionMs(),
-                ClientAudioEngine.getInstance().isHandheldPlaying()
-        ));
+        // ClientAudioEngine is the authoritative handheld runtime uploader.
+        // Avoid duplicate uploads here to prevent out-of-order state churn.
         lastPersistedRuntimeKey = key;
     }
 

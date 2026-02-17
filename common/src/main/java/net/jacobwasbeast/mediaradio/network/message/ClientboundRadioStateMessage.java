@@ -11,6 +11,9 @@ public record ClientboundRadioStateMessage(
         String queueStateJson,
         float volume,
         long positionMs,
+        long sentAtMs,
+        boolean forcePositionSync,
+        boolean seekEvent,
         boolean playing
 ) {
     private static final int MAX_PACKET_STRING = 262144;
@@ -27,6 +30,9 @@ public record ClientboundRadioStateMessage(
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readFloat(),
                 friendlyByteBuf.readLong(),
+                friendlyByteBuf.readLong(),
+                friendlyByteBuf.readBoolean(),
+                friendlyByteBuf.readBoolean(),
                 friendlyByteBuf.readBoolean()
         );
     }
@@ -40,6 +46,9 @@ public record ClientboundRadioStateMessage(
         friendlyByteBuf.writeUtf(queueStateJson == null ? "" : queueStateJson, MAX_PACKET_STRING);
         friendlyByteBuf.writeFloat(volume);
         friendlyByteBuf.writeLong(positionMs);
+        friendlyByteBuf.writeLong(sentAtMs);
+        friendlyByteBuf.writeBoolean(forcePositionSync);
+        friendlyByteBuf.writeBoolean(seekEvent);
         friendlyByteBuf.writeBoolean(playing);
     }
 }

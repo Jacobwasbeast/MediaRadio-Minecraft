@@ -34,6 +34,7 @@ public class RadioItem extends Item {
 
     public static final String TAG_PLACE_MODE = "PlaceMode";
     public static final String TAG_RADIO_ID = "RadioId";
+    public static final String TAG_OWNER_ID = "RadioOwnerId";
     private static final String TAG_URL = "RadioUrl";
     private static final String TAG_TITLE = "RadioTitle";
     private static final String TAG_ARTIST = "RadioArtist";
@@ -55,6 +56,7 @@ public class RadioItem extends Item {
     public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
         ensureRadioId(stack);
+        setOwnerId(stack, player.getStringUUID());
 
         if (player.isShiftKeyDown()) {
             setPlaceMode(stack, !isPlaceMode(stack));
@@ -108,7 +110,7 @@ public class RadioItem extends Item {
 
         BlockEntity blockEntity = level.getBlockEntity(placePos);
         if (blockEntity instanceof RadioBlockEntity radioBlockEntity) {
-            applyItemDataToBlockEntity(stack, radioBlockEntity);
+            applyItemDataToBlockEntity(stack, radioBlockEntity, player);
         }
 
         level.playSound(null, placePos, SoundEvents.STONE_PLACE, SoundSource.BLOCKS, 0.85f, 1.0f);
@@ -151,6 +153,7 @@ public class RadioItem extends Item {
             radioBlockEntity.setRadioId(radioId);
         }
         tag.putString(TAG_RADIO_ID, radioId);
+        tag.putString(TAG_OWNER_ID, safe(radioBlockEntity.getOwnerId()));
         tag.remove(TAG_URL);
         tag.remove(TAG_TITLE);
         tag.remove(TAG_ARTIST);
@@ -160,9 +163,29 @@ public class RadioItem extends Item {
         tag.remove(TAG_QUEUE_STATE);
     }
 
-    public static void applyItemDataToBlockEntity(ItemStack stack, RadioBlockEntity radioBlockEntity) {
-        radioBlockEntity.setRadioId(getOrCreateRadioId(stack));
+    public static void applyItemDataToBlockEntity(ItemStack stack, RadioBlockEntity radioBlockEntity, @Nullable Player placer) {
+        String radioId = getOrCreateRadioId(stack);
+        String ownerId = getOwnerId(stack);
+        String placerId = placer == null ? "" : safe(placer.getStringUUID());
+        boolean ownershipChanged = !placerId.isBlank() && !ownerId.isBlank() && !ownerId.equals(placerId);
+        boolean legacyOwnerlessPlacement = !placerId.isBlank() && ownerId.isBlank();
+        if (ownershipChanged || legacyOwnerlessPlacement) {
+            // Ownership transfer (or legacy ownerless handoff): prevent inheriting stale runtime identity.
+            radioId = UUID.randomUUID().toString();
+            stack.getOrCreateTag().putString(TAG_RADIO_ID, radioId);
+        }
+        if (!placerId.isBlank()) {
+            setOwnerId(stack, placerId);
+            radioBlockEntity.setOwnerId(placerId);
+        } else {
+            radioBlockEntity.setOwnerId(ownerId);
+        }
+        radioBlockEntity.setRadioId(radioId);
         SharedMediaManager.applyRuntimeStateToBlockEntity(radioBlockEntity);
+    }
+
+    public static void applyItemDataToBlockEntity(ItemStack stack, RadioBlockEntity radioBlockEntity) {
+        applyItemDataToBlockEntity(stack, radioBlockEntity, null);
     }
 
     private static String getString(ItemStack stack, String key) {
@@ -254,7 +277,23 @@ public class RadioItem extends Item {
         return tag.getString(TAG_RADIO_ID);
     }
 
+    public static String getOwnerId(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        if (tag == null) {
+            return "";
+        }
+        return safe(tag.getString(TAG_OWNER_ID));
+    }
+
+    public static void setOwnerId(ItemStack stack, String ownerId) {
+        stack.getOrCreateTag().putString(TAG_OWNER_ID, safe(ownerId));
+    }
+
     private static void ensureRadioId(ItemStack stack) {
         getOrCreateRadioId(stack);
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
     }
 }

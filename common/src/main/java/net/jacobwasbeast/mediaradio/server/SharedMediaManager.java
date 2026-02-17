@@ -12,17 +12,30 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.net.URI;
+import java.net.URISyntaxException;
 
 public class SharedMediaManager {
+    private static final long CHUNK_TTL_MS = 30_000L;
+    private static final int MAX_QUEUE_STATE_RADIO_PACKET = 8_192;
+    private static final Map<String, ChunkAccumulator> CHUNK_UPLOADS = new HashMap<>();
 
     public static void initialize() {
         Balm.getEvents().onEvent(net.blay09.mods.balm.api.event.PlayerLoginEvent.class,
-                event -> ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshot(event.getPlayer().server)));
+                event -> {
+                    ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshot(event.getPlayer().server));
+                    syncActiveHandheldRadiosToPlayer(event.getPlayer());
+                });
     }
 
     public static String getSnapshot(MinecraftServer server) {
@@ -48,6 +61,44 @@ public class SharedMediaManager {
         data.setSnapshotJson(mergedJson);
 
         ModNetworking.broadcastSharedSnapshot(player.server, mergedJson);
+    }
+
+    public static void handleClientSnapshotUploadChunk(
+            ServerPlayer player,
+            String transferId,
+            int chunkIndex,
+            int totalChunks,
+            String chunkData
+    ) {
+        if (player == null || transferId == null || transferId.isBlank() || chunkData == null) {
+            return;
+        }
+        if (totalChunks <= 0 || totalChunks > 512 || chunkIndex < 0 || chunkIndex >= totalChunks) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        String key = player.getUUID() + "|" + transferId;
+        String json;
+        synchronized (CHUNK_UPLOADS) {
+            CHUNK_UPLOADS.entrySet().removeIf(entry -> now - entry.getValue().createdAtMs > CHUNK_TTL_MS);
+            ChunkAccumulator accumulator = CHUNK_UPLOADS.computeIfAbsent(key, ignored -> new ChunkAccumulator(totalChunks, now));
+            if (accumulator.totalChunks != totalChunks) {
+                CHUNK_UPLOADS.remove(key);
+                return;
+            }
+            if (!accumulator.accept(chunkIndex, chunkData, SharedMediaSnapshot.MAX_JSON_LENGTH)) {
+                CHUNK_UPLOADS.remove(key);
+                return;
+            }
+            if (!accumulator.complete()) {
+                return;
+            }
+            json = accumulator.join();
+            CHUNK_UPLOADS.remove(key);
+        }
+
+        handleClientSnapshotUpload(player, json);
     }
 
     public static void handleRadioControl(ServerPlayer player, ServerboundRadioControlMessage message) {
@@ -162,6 +213,10 @@ public class SharedMediaManager {
         }
 
         RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
+        RadioRuntimeStateSavedData.RadioRuntimeState previousState = copyState(runtimeData.get(radioId));
+        long previousPosition = runtimeData.currentPositionMs(previousState);
+        String previousQueueForPacket = queueStateForPacket(previousState == null ? "" : previousState.queueStateJson);
+        boolean previousContextActive = shouldBroadcastHandheldContext(player, radioId, previousState);
         runtimeData.setFromClient(
                 radioId,
                 message.url(),
@@ -171,8 +226,46 @@ public class SharedMediaManager {
                 message.queueStateJson(),
                 message.volume(),
                 message.positionMs(),
+                message.seekSerial(),
                 message.playing()
         );
+
+        RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
+        int previousSeekSerial = previousState == null ? -1 : previousState.seekSerial;
+        long position = runtimeData.currentPositionMs(state);
+        String queueForPacket = queueStateForPacket(state.queueStateJson);
+        boolean contextActive = shouldBroadcastHandheldContext(player, radioId, state);
+        boolean seekEvent = previousState != null && state.seekSerial != previousSeekSerial;
+        boolean forcePositionSync = seekEvent
+                || previousState == null
+                || previousState.playing != state.playing
+                || !sameTrack(previousState.url, state.url);
+
+        if (!seekEvent
+                && !shouldBroadcastHandheldUpdate(previousState, previousPosition, state, position, previousQueueForPacket, queueForPacket, previousContextActive, contextActive)) {
+            return;
+        }
+
+        for (ServerPlayer other : player.server.getPlayerList().getPlayers()) {
+            if (other == null || other == player) {
+                continue;
+            }
+            ModNetworking.sendPlayerRadioContext(other, radioId, player.getId(), contextActive);
+            ModNetworking.sendRadioState(other, new ClientboundRadioStateMessage(
+                    radioId,
+                    safe(state.url),
+                    safe(state.title),
+                    safe(state.artist),
+                    safe(state.thumbnail),
+                    queueForPacket,
+                    Mth.clamp(state.volume, 0f, 2f),
+                    position,
+                    System.currentTimeMillis(),
+                    forcePositionSync,
+                    seekEvent,
+                    state.playing
+            ));
+        }
     }
 
     public static void handleRadioStateRequest(ServerPlayer player, ServerboundRequestRadioStateMessage message) {
@@ -189,9 +282,12 @@ public class SharedMediaManager {
                 safe(state.title),
                 safe(state.artist),
                 safe(state.thumbnail),
-                safe(state.queueStateJson),
+                queueStateForPacket(state.queueStateJson),
                 Mth.clamp(state.volume, 0f, 2f),
                 position,
+                System.currentTimeMillis(),
+                true,
+                false,
                 state.playing
         ));
     }
@@ -313,5 +409,258 @@ public class SharedMediaManager {
         copy.invitedPlayerNames = source.invitedPlayerNames == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.invitedPlayerNames);
         copy.sanitize();
         return copy;
+    }
+
+    private static boolean shouldBroadcastHandheldContext(ServerPlayer player, String radioId, RadioRuntimeStateSavedData.RadioRuntimeState state) {
+        if (player == null || radioId == null || radioId.isBlank() || state == null) {
+            return false;
+        }
+        if (!state.playing || safe(state.url).isBlank()) {
+            return false;
+        }
+        ItemStack main = player.getMainHandItem();
+        if (main.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+                && radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(main))
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(main)) {
+            return true;
+        }
+        ItemStack off = player.getOffhandItem();
+        return off.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+                && radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(off))
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off);
+    }
+
+    private static boolean shouldBroadcastHandheldUpdate(
+            RadioRuntimeStateSavedData.RadioRuntimeState previous,
+            long previousPosition,
+            RadioRuntimeStateSavedData.RadioRuntimeState current,
+            long currentPosition,
+            String previousQueueForPacket,
+            String currentQueueForPacket,
+            boolean previousContextActive,
+            boolean currentContextActive
+    ) {
+        if (current == null) {
+            return false;
+        }
+        if (previous == null) {
+            return true;
+        }
+        if (previousContextActive != currentContextActive) {
+            return true;
+        }
+        if (!sameTrack(previous.url, current.url)) {
+            return true;
+        }
+        if (!safe(previous.title).equals(safe(current.title))) {
+            return true;
+        }
+        if (!safe(previous.artist).equals(safe(current.artist))) {
+            return true;
+        }
+        if (!safe(previous.thumbnail).equals(safe(current.thumbnail))) {
+            return true;
+        }
+        if (!Objects.equals(previousQueueForPacket, currentQueueForPacket)) {
+            return true;
+        }
+        if (previous.playing != current.playing) {
+            return true;
+        }
+        if (Math.abs(previous.volume - current.volume) > 0.01f) {
+            return true;
+        }
+
+        // While playing, only broadcast larger jumps here. Periodic correction is handled separately.
+        if (current.playing) {
+            return Math.abs(currentPosition - previousPosition) >= 2_000L;
+        }
+        // While paused/stopped, propagate meaningful seek updates.
+        return Math.abs(currentPosition - previousPosition) >= 250L;
+    }
+
+    private static RadioRuntimeStateSavedData.RadioRuntimeState copyState(RadioRuntimeStateSavedData.RadioRuntimeState source) {
+        if (source == null) {
+            return null;
+        }
+        RadioRuntimeStateSavedData.RadioRuntimeState copy = new RadioRuntimeStateSavedData.RadioRuntimeState();
+        copy.url = safe(source.url);
+        copy.title = safe(source.title);
+        copy.artist = safe(source.artist);
+        copy.thumbnail = safe(source.thumbnail);
+        copy.queueStateJson = safe(source.queueStateJson);
+        copy.volume = Mth.clamp(source.volume, 0f, 2f);
+        copy.positionMs = Math.max(0L, source.positionMs);
+        copy.seekSerial = Math.max(0, source.seekSerial);
+        copy.playing = source.playing;
+        copy.updatedAtMs = Math.max(0L, source.updatedAtMs);
+        return copy;
+    }
+
+    private static void syncActiveHandheldRadiosToPlayer(ServerPlayer target) {
+        if (target == null || target.server == null) {
+            return;
+        }
+
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(target.server);
+        for (ServerPlayer owner : target.server.getPlayerList().getPlayers()) {
+            if (owner == null || owner == target) {
+                continue;
+            }
+            Set<String> heldRadioIds = heldHandRadioIds(owner);
+            if (heldRadioIds.isEmpty()) {
+                continue;
+            }
+            for (String radioId : heldRadioIds) {
+                RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.get(radioId);
+                if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
+                    continue;
+                }
+                ModNetworking.sendPlayerRadioContext(target, radioId, owner.getId(), true);
+                ModNetworking.sendRadioState(target, new ClientboundRadioStateMessage(
+                        radioId,
+                        safe(state.url),
+                        safe(state.title),
+                        safe(state.artist),
+                        safe(state.thumbnail),
+                        queueStateForPacket(state.queueStateJson),
+                        Mth.clamp(state.volume, 0f, 2f),
+                        runtimeData.currentPositionMs(state),
+                        System.currentTimeMillis(),
+                        true,
+                        false,
+                        state.playing
+                ));
+            }
+        }
+    }
+
+    private static Set<String> heldHandRadioIds(ServerPlayer player) {
+        Set<String> radioIds = new HashSet<>();
+        if (player == null) {
+            return radioIds;
+        }
+        ItemStack main = player.getMainHandItem();
+        if (main.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(main)) {
+            String id = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(main));
+            if (!id.isBlank()) {
+                radioIds.add(id);
+            }
+        }
+        ItemStack off = player.getOffhandItem();
+        if (off.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off)) {
+            String id = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(off));
+            if (!id.isBlank()) {
+                radioIds.add(id);
+            }
+        }
+        return radioIds;
+    }
+
+    private static boolean sameTrack(String left, String right) {
+        return trackSyncKey(left).equals(trackSyncKey(right));
+    }
+
+    private static String trackSyncKey(String url) {
+        String safeUrl = safe(url);
+        if (safeUrl.isBlank()) {
+            return "";
+        }
+        String trimmed = safeUrl.trim();
+        try {
+            URI uri = new URI(trimmed);
+            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase();
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            if (host.contains("youtube.com")) {
+                String videoId = queryParam(uri.getRawQuery(), "v");
+                if (!videoId.isBlank()) {
+                    return "yt:" + videoId;
+                }
+            } else if (host.equals("youtu.be")) {
+                String id = path.startsWith("/") ? path.substring(1) : path;
+                int slash = id.indexOf('/');
+                if (slash >= 0) {
+                    id = id.substring(0, slash);
+                }
+                if (!id.isBlank()) {
+                    return "yt:" + id;
+                }
+            }
+            String normalizedPath = path.endsWith("/") && path.length() > 1 ? path.substring(0, path.length() - 1) : path;
+            return host + normalizedPath;
+        } catch (URISyntaxException ignored) {
+            return trimmed;
+        }
+    }
+
+    private static String queryParam(String rawQuery, String key) {
+        if (rawQuery == null || rawQuery.isBlank() || key == null || key.isBlank()) {
+            return "";
+        }
+        String[] pairs = rawQuery.split("&");
+        for (String pair : pairs) {
+            int separator = pair.indexOf('=');
+            String k = separator >= 0 ? pair.substring(0, separator) : pair;
+            if (!key.equals(k)) {
+                continue;
+            }
+            String value = separator >= 0 && separator + 1 < pair.length() ? pair.substring(separator + 1) : "";
+            return value == null ? "" : value;
+        }
+        return "";
+    }
+
+    private static String queueStateForPacket(String queueStateJson) {
+        String safe = safe(queueStateJson);
+        if (safe.isBlank()) {
+            return "";
+        }
+        if (safe.length() <= MAX_QUEUE_STATE_RADIO_PACKET) {
+            return safe;
+        }
+        return "";
+    }
+
+    private static class ChunkAccumulator {
+        private final int totalChunks;
+        private final String[] chunks;
+        private final long createdAtMs;
+        private int received;
+        private int totalLength;
+
+        private ChunkAccumulator(int totalChunks, long createdAtMs) {
+            this.totalChunks = totalChunks;
+            this.chunks = new String[totalChunks];
+            this.createdAtMs = createdAtMs;
+        }
+
+        private boolean accept(int index, String chunk, int maxLength) {
+            if (index < 0 || index >= totalChunks) {
+                return false;
+            }
+            if (chunks[index] != null) {
+                return true;
+            }
+            chunks[index] = chunk;
+            received++;
+            totalLength += chunk.length();
+            return totalLength <= maxLength;
+        }
+
+        private boolean complete() {
+            return received == totalChunks;
+        }
+
+        private String join() {
+            StringBuilder builder = new StringBuilder(totalLength);
+            for (String chunk : chunks) {
+                if (chunk != null) {
+                    builder.append(chunk);
+                }
+            }
+            return builder.toString();
+        }
     }
 }
