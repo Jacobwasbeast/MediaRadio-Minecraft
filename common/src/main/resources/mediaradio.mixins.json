@@ -10,7 +10,8 @@
     "GuiMixin",
     "HumanoidModelMixin",
     "ItemRendererMixin",
-    "ItemPropertiesAccessor"
+    "ItemPropertiesAccessor",
+    "SoundOptionsScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

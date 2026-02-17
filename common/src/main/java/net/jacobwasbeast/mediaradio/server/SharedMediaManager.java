@@ -267,7 +267,8 @@ public class SharedMediaManager {
             if (!shouldBroadcastToHandheldListener(player, other)) {
                 continue;
             }
-            ModNetworking.sendPlayerRadioContext(other, radioId, player.getId(), contextActive);
+            boolean inventoryPlayback = contextActive && isInventoryPlaybackContext(player, radioId);
+            ModNetworking.sendPlayerRadioContext(other, radioId, player.getId(), contextActive, inventoryPlayback);
             ModNetworking.sendRadioState(other, new ClientboundRadioStateMessage(
                     radioId,
                     safe(state.url),
@@ -540,7 +541,8 @@ public class SharedMediaManager {
                 if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
                     continue;
                 }
-                ModNetworking.sendPlayerRadioContext(target, radioId, owner.getId(), true);
+                boolean inventoryPlayback = isInventoryPlaybackContext(owner, radioId);
+                ModNetworking.sendPlayerRadioContext(target, radioId, owner.getId(), true, inventoryPlayback);
                 ModNetworking.sendRadioState(target, new ClientboundRadioStateMessage(
                         radioId,
                         safe(state.url),
@@ -592,7 +594,8 @@ public class SharedMediaManager {
                     }
                     String contextKey = handheldContextKey(owner, listener, radioId);
                     currentActiveContexts.add(contextKey);
-                    ModNetworking.sendPlayerRadioContext(listener, radioId, owner.getId(), true);
+                    boolean inventoryPlayback = isInventoryPlaybackContext(owner, radioId);
+                    ModNetworking.sendPlayerRadioContext(listener, radioId, owner.getId(), true, inventoryPlayback);
                     if (!ACTIVE_HANDHELD_LISTENER_CONTEXTS.containsKey(contextKey)) {
                         ModNetworking.sendRadioState(listener, new ClientboundRadioStateMessage(
                                 radioId,
@@ -623,7 +626,7 @@ public class SharedMediaManager {
             }
             ServerPlayer listener = server.getPlayerList().getPlayer(context.listenerUuid);
             if (listener != null) {
-                ModNetworking.sendPlayerRadioContext(listener, context.radioId, 0, false);
+                ModNetworking.sendPlayerRadioContext(listener, context.radioId, 0, false, false);
             }
         }
     }
@@ -686,6 +689,26 @@ public class SharedMediaManager {
             }
         }
         return false;
+    }
+
+    private static boolean isHeldHandRadio(ServerPlayer player, String radioId) {
+        if (player == null || radioId == null || radioId.isBlank()) {
+            return false;
+        }
+        ItemStack main = player.getMainHandItem();
+        if (main.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+                && radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(main))
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(main)) {
+            return true;
+        }
+        ItemStack off = player.getOffhandItem();
+        return off.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+                && radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(off))
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off);
+    }
+
+    private static boolean isInventoryPlaybackContext(ServerPlayer player, String radioId) {
+        return !isHeldHandRadio(player, radioId) && hasRadioInInventory(player, radioId);
     }
 
     private static boolean sameTrack(String left, String right) {

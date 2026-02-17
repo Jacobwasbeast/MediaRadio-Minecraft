@@ -102,8 +102,8 @@ public class ModNetworking {
                     }
                     try {
                         Class<?> clientClass = Class.forName("net.jacobwasbeast.mediaradio.client.MediaRadioClient");
-                        clientClass.getMethod("applyServerPlayerRadioContext", String.class, int.class, boolean.class)
-                                .invoke(null, message.radioId(), message.entityId(), message.active());
+                        clientClass.getMethod("applyServerPlayerRadioContext", String.class, int.class, boolean.class, boolean.class)
+                                .invoke(null, message.radioId(), message.entityId(), message.active(), message.inventoryPlayback());
                     } catch (Exception exception) {
                         LOGGER.error("Failed to apply player radio context on client", exception);
                     }
@@ -281,8 +281,8 @@ public class ModNetworking {
         Balm.getNetworking().sendTo(player, new ClientboundOpenContraptionRadioMessage(radioId, contraptionEntityId, localPos));
     }
 
-    public static void sendPlayerRadioContext(ServerPlayer player, String radioId, int entityId, boolean active) {
-        Balm.getNetworking().sendTo(player, new ClientboundPlayerRadioContextMessage(radioId, entityId, active));
+    public static void sendPlayerRadioContext(ServerPlayer player, String radioId, int entityId, boolean active, boolean inventoryPlayback) {
+        Balm.getNetworking().sendTo(player, new ClientboundPlayerRadioContextMessage(radioId, entityId, active, inventoryPlayback));
     }
 
     private static int chunkCount(int totalLength, int chunkSize) {

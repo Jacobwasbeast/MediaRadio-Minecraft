@@ -17,6 +17,7 @@ import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.render.RadioBlockEntityRenderer;
 import net.jacobwasbeast.mediaradio.client.screen.RadioScreen;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
+import net.jacobwasbeast.mediaradio.client.settings.ClientAudioSettings;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.mixin.ItemPropertiesAccessor;
 import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
@@ -31,6 +32,7 @@ public class MediaRadioClient {
         ModKeyMappings.initialize();
         ClientMediaRepository.initialize();
         LavaPlayerNativeLoader.initialize();
+        ClientAudioSettings.get().load();
 
         BalmClient.getRenderers().registerBlockEntityRenderer(
                 () -> ModBlockEntities.RADIO_BLOCK_ENTITY.get(),
@@ -179,7 +181,7 @@ public class MediaRadioClient {
         );
     }
 
-    public static void applyServerPlayerRadioContext(String radioId, int entityId, boolean active) {
+    public static void applyServerPlayerRadioContext(String radioId, int entityId, boolean active, boolean inventoryPlayback) {
         if (radioId == null || radioId.isBlank()) {
             return;
         }
@@ -192,7 +194,7 @@ public class MediaRadioClient {
             return;
         }
         boolean wasExternal = audioEngine.hasExternalContext(radioId);
-        audioEngine.setExternalContext(radioId, entityId, null);
+        audioEngine.setExternalContext(radioId, entityId, null, inventoryPlayback);
         if (!wasExternal) {
             ModNetworking.requestRadioState(radioId);
         }

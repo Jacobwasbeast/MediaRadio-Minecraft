@@ -3,6 +3,7 @@ package net.jacobwasbeast.mediaradio.client.audio;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.screen.RadioScreen;
+import net.jacobwasbeast.mediaradio.client.settings.ClientAudioSettings;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
@@ -355,11 +356,15 @@ public class ClientAudioEngine {
     }
 
     public void setExternalContext(String radioId, int contraptionEntityId, BlockPos localPos) {
+        setExternalContext(radioId, contraptionEntityId, localPos, false);
+    }
+
+    public void setExternalContext(String radioId, int contraptionEntityId, BlockPos localPos, boolean inventoryPlayback) {
         String safeRadioId = safeRadioId(radioId);
         if (safeRadioId.isBlank()) {
             return;
         }
-        registerExternalContext(safeRadioId, contraptionEntityId, localPos);
+        registerExternalContext(safeRadioId, contraptionEntityId, localPos, inventoryPlayback);
         HandheldSession session = handheldSessions.computeIfAbsent(safeRadioId, HandheldSession::new);
         if (session != null) {
             reconfigureSessionChannelMode(session, true);
@@ -556,7 +561,7 @@ public class ClientAudioEngine {
         }
 
         boolean wasExternal = hasExternalContext(safeRadioId);
-        registerExternalContext(safeRadioId, contraptionEntityId, localPos);
+        registerExternalContext(safeRadioId, contraptionEntityId, localPos, false);
         if (!wasExternal) {
             ModNetworking.requestRadioState(safeRadioId);
         }
@@ -899,14 +904,26 @@ public class ClientAudioEngine {
                     resolveExternalMaxDistance(session.radioId)
             );
         }
-        return new RadioAudioChannel(false, () -> Vec3.ZERO, () -> Mth.clamp(session.volume, 0f, 2f), 1f);
+        return new RadioAudioChannel(
+                false,
+                () -> Vec3.ZERO,
+                () -> Mth.clamp(session.volume * ClientAudioSettings.get().selfHandheldVolume(), 0f, 2f),
+                1f
+        );
     }
 
     private float resolveExternalSessionVolume(HandheldSession session, String radioId) {
         float baseVolume = Mth.clamp(session == null ? 1.0f : session.volume, 0f, 2f);
         ExternalRadioContext context = externalContexts.get(radioId);
-        if (context == null || context.localPos != null) {
+        ClientAudioSettings settings = ClientAudioSettings.get();
+        if (context == null) {
             return baseVolume;
+        }
+        if (context.localPos != null) {
+            return Mth.clamp(baseVolume * settings.blockRadioVolume(), 0f, 2f);
+        }
+        if (context.inventoryPlayback && !settings.hearInventoryPlayerRadios()) {
+            return 0f;
         }
 
         Minecraft minecraft = Minecraft.getInstance();
@@ -922,7 +939,7 @@ public class ClientAudioEngine {
         if (sourcePos == null || minecraft.player.position().distanceToSqr(sourcePos) > HANDHELD_EXTERNAL_MAX_DISTANCE_SQR) {
             return 0f;
         }
-        return baseVolume;
+        return Mth.clamp(baseVolume * settings.otherPlayersHandheldVolume(), 0f, 2f);
     }
 
     private float resolveExternalMaxDistance(String radioId) {
@@ -976,17 +993,18 @@ public class ClientAudioEngine {
         return radioId != null && !radioId.isBlank() && externalRadioIds.contains(radioId);
     }
 
-    private void registerExternalContext(String radioId, int contraptionEntityId, BlockPos localPos) {
+    private void registerExternalContext(String radioId, int contraptionEntityId, BlockPos localPos, boolean inventoryPlayback) {
         Minecraft minecraft = Minecraft.getInstance();
         long nowTick = minecraft.level == null ? 0L : minecraft.level.getGameTime();
         ExternalRadioContext existing = externalContexts.get(radioId);
         if (existing != null && existing.matches(contraptionEntityId, localPos)) {
             existing.lastSeenGameTick = nowTick;
+            existing.inventoryPlayback = inventoryPlayback;
             externalRadioIds.add(radioId);
             return;
         }
 
-        ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos);
+        ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos, inventoryPlayback);
         context.lastSeenGameTick = nowTick;
         externalContexts.put(radioId, context);
         externalRadioIds.add(radioId);
@@ -1242,7 +1260,6 @@ public class ClientAudioEngine {
         if (runtimeRadioId.isBlank()) {
             runtimeRadioId = session.radioId;
         }
-        boolean allowInventoryBroadcast = RadioItem.isInventoryBroadcastAllowed(stack);
         syncRuntimeStateToServer(
                 session,
                 runtimeRadioId,
@@ -1253,7 +1270,7 @@ public class ClientAudioEngine {
                 queueStateJson,
                 position,
                 session.volume,
-                allowInventoryBroadcast
+                true
         );
     }
 
@@ -1510,7 +1527,7 @@ public class ClientAudioEngine {
                             ignored -> new RadioAudioChannel(
                                     true,
                                     () -> Vec3.atCenterOf(blockPos),
-                                    radioBlockEntity::getVolume,
+                                    () -> resolveBlockChannelVolume(radioBlockEntity.getVolume()),
                                     30f));
 
                     long targetPosition = radioBlockEntity.getPlaybackPositionMs();
@@ -1694,6 +1711,10 @@ public class ClientAudioEngine {
         }
     }
 
+    private float resolveBlockChannelVolume(float sourceVolume) {
+        return Mth.clamp(sourceVolume * ClientAudioSettings.get().blockRadioVolume(), 0f, 2f);
+    }
+
     private static class HandheldSession {
         private final String radioId;
         private RadioAudioChannel channel;
@@ -1720,14 +1741,16 @@ public class ClientAudioEngine {
     private static class ExternalRadioContext {
         private final int contraptionEntityId;
         private final BlockPos localPos;
+        private volatile boolean inventoryPlayback;
         private volatile Vec3 lastKnownPos = Vec3.ZERO;
         private volatile Vec3 smoothedPos;
         private volatile long lastSmoothNanos;
         private volatile long lastSeenGameTick;
 
-        private ExternalRadioContext(int contraptionEntityId, BlockPos localPos) {
+        private ExternalRadioContext(int contraptionEntityId, BlockPos localPos, boolean inventoryPlayback) {
             this.contraptionEntityId = contraptionEntityId;
             this.localPos = localPos;
+            this.inventoryPlayback = inventoryPlayback;
         }
 
         private boolean matches(int entityId, BlockPos blockPos) {
