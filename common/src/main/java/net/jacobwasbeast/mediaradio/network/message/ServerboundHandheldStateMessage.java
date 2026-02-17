@@ -12,7 +12,8 @@ public record ServerboundHandheldStateMessage(
         float volume,
         long positionMs,
         int seekSerial,
-        boolean playing
+        boolean playing,
+        boolean allowInventoryBroadcast
 ) {
     private static final int MAX_PACKET_STRING = 262144;
     private static final int MAX_TITLE_ARTIST = 4096;
@@ -29,6 +30,7 @@ public record ServerboundHandheldStateMessage(
                 friendlyByteBuf.readFloat(),
                 friendlyByteBuf.readLong(),
                 friendlyByteBuf.readVarInt(),
+                friendlyByteBuf.readBoolean(),
                 friendlyByteBuf.readBoolean()
         );
     }
@@ -44,5 +46,6 @@ public record ServerboundHandheldStateMessage(
         friendlyByteBuf.writeLong(positionMs);
         friendlyByteBuf.writeVarInt(Math.max(0, seekSerial));
         friendlyByteBuf.writeBoolean(playing);
+        friendlyByteBuf.writeBoolean(allowInventoryBroadcast);
     }
 }

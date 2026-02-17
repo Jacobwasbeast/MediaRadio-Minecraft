@@ -1242,7 +1242,19 @@ public class ClientAudioEngine {
         if (runtimeRadioId.isBlank()) {
             runtimeRadioId = session.radioId;
         }
-        syncRuntimeStateToServer(session, runtimeRadioId, resolvedUrl, resolvedTitle, resolvedArtist, resolvedThumbnail, queueStateJson, position, session.volume);
+        boolean allowInventoryBroadcast = RadioItem.isInventoryBroadcastAllowed(stack);
+        syncRuntimeStateToServer(
+                session,
+                runtimeRadioId,
+                resolvedUrl,
+                resolvedTitle,
+                resolvedArtist,
+                resolvedThumbnail,
+                queueStateJson,
+                position,
+                session.volume,
+                allowInventoryBroadcast
+        );
     }
 
     private void syncRuntimeStateToServer(
@@ -1254,7 +1266,8 @@ public class ClientAudioEngine {
             String thumbnail,
             String queueStateJson,
             long position,
-            float volume
+            float volume,
+            boolean allowInventoryBroadcast
     ) {
         if (radioId == null || radioId.isBlank()) {
             return;
@@ -1263,7 +1276,8 @@ public class ClientAudioEngine {
         float clampedVolume = Mth.clamp(volume, 0f, 2f);
         boolean shouldPlay = session.intendedPlaying && !safe(url).isBlank();
         String stateKey = radioId + "|" + safe(url) + "|" + safe(title) + "|" + safe(artist) + "|" + safe(thumbnail) + "|"
-                + queueStateJson.hashCode() + "|" + positionBucket + "|" + clampedVolume + "|" + shouldPlay + "|" + session.seekSerial;
+                + queueStateJson.hashCode() + "|" + positionBucket + "|" + clampedVolume + "|" + shouldPlay + "|"
+                + allowInventoryBroadcast + "|" + session.seekSerial;
         if (stateKey.equals(session.lastSyncedRuntimeKey)) {
             return;
         }
@@ -1278,9 +1292,21 @@ public class ClientAudioEngine {
                 clampedVolume,
                 Math.max(0L, position),
                 Math.max(0, session.seekSerial),
-                shouldPlay
+                shouldPlay,
+                allowInventoryBroadcast
         ));
         session.lastSyncedRuntimeKey = stateKey;
+    }
+
+    public void invalidateHandheldRuntimeSync(String radioId) {
+        String safeRadioId = safeRadioId(radioId);
+        if (safeRadioId.isBlank()) {
+            return;
+        }
+        HandheldSession session = handheldSessions.get(safeRadioId);
+        if (session != null) {
+            session.lastSyncedRuntimeKey = "";
+        }
     }
 
     private ItemStack findRadioStackById(Minecraft minecraft, String targetRadioId) {

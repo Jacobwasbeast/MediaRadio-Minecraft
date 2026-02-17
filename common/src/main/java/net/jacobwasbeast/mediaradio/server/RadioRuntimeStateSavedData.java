@@ -88,7 +88,8 @@ public class RadioRuntimeStateSavedData extends SavedData {
             float volume,
             long positionMs,
             int seekSerial,
-            boolean playing
+            boolean playing,
+            boolean allowInventoryBroadcast
     ) {
         RadioRuntimeState state = getOrCreate(radioId);
         state.url = safe(url);
@@ -100,6 +101,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
         state.positionMs = Math.max(0L, positionMs);
         state.seekSerial = Math.max(0, seekSerial);
         state.playing = playing;
+        state.allowInventoryBroadcast = allowInventoryBroadcast;
         state.updatedAtMs = System.currentTimeMillis();
         setDirty();
     }
@@ -114,6 +116,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
         public long positionMs = 0L;
         public int seekSerial = 0;
         public boolean playing = false;
+        public boolean allowInventoryBroadcast = false;
         public long updatedAtMs = 0L;
 
         public void sanitize() {

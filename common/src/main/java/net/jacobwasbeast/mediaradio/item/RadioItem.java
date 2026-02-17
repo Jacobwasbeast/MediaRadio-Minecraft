@@ -35,6 +35,7 @@ public class RadioItem extends Item {
     public static final String TAG_PLACE_MODE = "PlaceMode";
     public static final String TAG_RADIO_ID = "RadioId";
     public static final String TAG_OWNER_ID = "RadioOwnerId";
+    public static final String TAG_ALLOW_INVENTORY_BROADCAST = "AllowInventoryBroadcast";
     private static final String TAG_URL = "RadioUrl";
     private static final String TAG_TITLE = "RadioTitle";
     private static final String TAG_ARTIST = "RadioArtist";
@@ -287,6 +288,20 @@ public class RadioItem extends Item {
 
     public static void setOwnerId(ItemStack stack, String ownerId) {
         stack.getOrCreateTag().putString(TAG_OWNER_ID, safe(ownerId));
+    }
+
+    public static boolean isInventoryBroadcastAllowed(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        return tag != null && tag.getBoolean(TAG_ALLOW_INVENTORY_BROADCAST);
+    }
+
+    public static void setInventoryBroadcastAllowed(ItemStack stack, boolean allowed) {
+        CompoundTag tag = stack.getOrCreateTag();
+        if (allowed) {
+            tag.putBoolean(TAG_ALLOW_INVENTORY_BROADCAST, true);
+            return;
+        }
+        tag.remove(TAG_ALLOW_INVENTORY_BROADCAST);
     }
 
     private static void ensureRadioId(ItemStack stack) {

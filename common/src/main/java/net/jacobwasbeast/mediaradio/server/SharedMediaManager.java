@@ -237,7 +237,8 @@ public class SharedMediaManager {
                 message.volume(),
                 message.positionMs(),
                 message.seekSerial(),
-                message.playing()
+                message.playing(),
+                message.allowInventoryBroadcast()
         );
 
         RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
@@ -441,9 +442,15 @@ public class SharedMediaManager {
             return true;
         }
         ItemStack off = player.getOffhandItem();
-        return off.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
+        if (off.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
                 && radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(off))
-                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off);
+                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off)) {
+            return true;
+        }
+        if (!state.allowInventoryBroadcast) {
+            return false;
+        }
+        return hasRadioInInventory(player, radioId);
     }
 
     private static boolean shouldBroadcastHandheldUpdate(
@@ -509,6 +516,7 @@ public class SharedMediaManager {
         copy.positionMs = Math.max(0L, source.positionMs);
         copy.seekSerial = Math.max(0, source.seekSerial);
         copy.playing = source.playing;
+        copy.allowInventoryBroadcast = source.allowInventoryBroadcast;
         copy.updatedAtMs = Math.max(0L, source.updatedAtMs);
         return copy;
     }
@@ -523,11 +531,11 @@ public class SharedMediaManager {
             if (owner == null || owner == target) {
                 continue;
             }
-            Set<String> heldRadioIds = heldHandRadioIds(owner);
-            if (heldRadioIds.isEmpty()) {
+            Set<String> candidateRadioIds = candidateHandheldRadioIds(owner);
+            if (candidateRadioIds.isEmpty()) {
                 continue;
             }
-            for (String radioId : heldRadioIds) {
+            for (String radioId : candidateRadioIds) {
                 RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.get(radioId);
                 if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
                     continue;
@@ -566,11 +574,11 @@ public class SharedMediaManager {
             if (owner == null) {
                 continue;
             }
-            Set<String> heldRadioIds = heldHandRadioIds(owner);
-            if (heldRadioIds.isEmpty()) {
+            Set<String> candidateRadioIds = candidateHandheldRadioIds(owner);
+            if (candidateRadioIds.isEmpty()) {
                 continue;
             }
-            for (String radioId : heldRadioIds) {
+            for (String radioId : candidateRadioIds) {
                 RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.get(radioId);
                 if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
                     continue;
@@ -634,28 +642,50 @@ public class SharedMediaManager {
         return owner.distanceToSqr(listener) <= HANDHELD_LISTENER_SYNC_RANGE_SQR;
     }
 
-    private static Set<String> heldHandRadioIds(ServerPlayer player) {
+    private static Set<String> candidateHandheldRadioIds(ServerPlayer player) {
         Set<String> radioIds = new HashSet<>();
         if (player == null) {
             return radioIds;
         }
-        ItemStack main = player.getMainHandItem();
-        if (main.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
-                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(main)) {
-            String id = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(main));
+        for (ItemStack stack : player.getInventory().items) {
+            if (!stack.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)) {
+                continue;
+            }
+            String id = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(stack));
             if (!id.isBlank()) {
                 radioIds.add(id);
             }
         }
-        ItemStack off = player.getOffhandItem();
-        if (off.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)
-                && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off)) {
-            String id = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(off));
+        for (ItemStack stack : player.getInventory().offhand) {
+            if (!stack.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)) {
+                continue;
+            }
+            String id = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(stack));
             if (!id.isBlank()) {
                 radioIds.add(id);
             }
         }
         return radioIds;
+    }
+
+    private static boolean hasRadioInInventory(ServerPlayer player, String radioId) {
+        if (player == null || radioId == null || radioId.isBlank()) {
+            return false;
+        }
+        int selectedSlot = player.getInventory().selected;
+        for (int i = 0; i < player.getInventory().items.size(); i++) {
+            if (i == selectedSlot) {
+                continue;
+            }
+            ItemStack stack = player.getInventory().items.get(i);
+            if (!stack.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)) {
+                continue;
+            }
+            if (radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(stack))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean sameTrack(String left, String right) {

@@ -24,6 +24,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ItemStack;
 
 import java.util.List;
 import java.util.Locale;
@@ -112,6 +113,7 @@ public class RadioScreen extends Screen {
 
     private StyledButton pauseResumeButton;
     private StyledButton loopModeButton;
+    private StyledButton inventoryBroadcastButton;
     private StyledButton playlistAccessButton;
     private StyledButton playlistRenameButton;
     private StyledButton playlistDeleteButton;
@@ -244,6 +246,7 @@ public class RadioScreen extends Screen {
 
         clampSelections();
         updatePauseResumeButtonLabel();
+        updateInventoryBroadcastButtonLabel();
         updatePlaylistBrowseButtonStates();
         persistRuntimeState();
         updatePlaylistAccessButtonLabel();
@@ -338,6 +341,22 @@ public class RadioScreen extends Screen {
         addRenderableWidget(new StyledButton(controlsX, row3Y, halfW, 22, Component.literal("🔀 Shuffle"), this::shuffleQueue, false, false));
         loopModeButton = new StyledButton(controlsX + halfW + buttonGap, row3Y, controlsW - halfW - buttonGap, 22, Component.literal("🔁 Loop: All"), this::cycleLoopMode, false, false);
         addRenderableWidget(loopModeButton);
+        inventoryBroadcastButton = null;
+        if (!isBlockMode()) {
+            int row4Y = row3Y + 30;
+            inventoryBroadcastButton = new StyledButton(
+                    controlsX,
+                    row4Y,
+                    controlsW,
+                    22,
+                    Component.literal("Share In Inventory: Off"),
+                    this::toggleInventoryBroadcast,
+                    false,
+                    false
+            );
+            addRenderableWidget(inventoryBroadcastButton);
+            updateInventoryBroadcastButtonLabel();
+        }
 
         int rightX = nowRightPanelX();
         int rightW = nowRightPanelW();
@@ -569,7 +588,8 @@ public class RadioScreen extends Screen {
         int timerY = Math.max(y + 86, artistBottom + 4);
         guiGraphics.drawString(font, "Time: " + timer, textX, timerY, COLOR_ACCENT_ALT, false);
         drawTimelineBar(guiGraphics, playback, textX, timerY + 12, textW, 8);
-        guiGraphics.drawString(font, "Volume: " + String.format(Locale.ROOT, "%.0f%%", playback.volume() * 100f), x + 12, y + 214, COLOR_MUTED, false);
+        int volumeY = isBlockMode() ? y + 214 : y + 242;
+        guiGraphics.drawString(font, "Volume: " + String.format(Locale.ROOT, "%.0f%%", playback.volume() * 100f), x + 12, volumeY, COLOR_MUTED, false);
 
         guiGraphics.drawString(font, "Queue", rightX + 8, y + 10, COLOR_ACCENT, false);
         List<SharedMediaSnapshot.MediaEntry> queueEntries = ClientMediaRepository.getInstance().getQueueEntries();
@@ -1831,6 +1851,21 @@ public class RadioScreen extends Screen {
         persistRuntimeState();
     }
 
+    private void toggleInventoryBroadcast() {
+        if (isBlockMode()) {
+            return;
+        }
+        ItemStack stack = getActiveHandheldRadioStack();
+        if (!stack.is(ModItems.RADIO_ITEM)) {
+            return;
+        }
+        boolean enabled = !RadioItem.isInventoryBroadcastAllowed(stack);
+        RadioItem.setInventoryBroadcastAllowed(stack, enabled);
+        String radioId = RadioItem.getRadioId(stack);
+        ClientAudioEngine.getInstance().invalidateHandheldRuntimeSync(radioId);
+        updateInventoryBroadcastButtonLabel();
+    }
+
     private void playEntry(SharedMediaSnapshot.MediaEntry entry, boolean syncQueueSelection) {
         if (entry == null || entry.url == null || entry.url.isBlank()) {
             return;
@@ -2313,6 +2348,17 @@ public class RadioScreen extends Screen {
         loopModeButton.setMessage(Component.literal(label));
     }
 
+    private void updateInventoryBroadcastButtonLabel() {
+        if (inventoryBroadcastButton == null || tab != Tab.NOW || isBlockMode()) {
+            return;
+        }
+        ItemStack stack = getActiveHandheldRadioStack();
+        boolean hasRadio = stack.is(ModItems.RADIO_ITEM);
+        inventoryBroadcastButton.active = hasRadio;
+        boolean enabled = hasRadio && RadioItem.isInventoryBroadcastAllowed(stack);
+        inventoryBroadcastButton.setMessage(Component.literal(enabled ? "Share In Inventory: On" : "Share In Inventory: Off"));
+    }
+
     private void updatePlaylistAccessButtonLabel() {
         if (playlistAccessButton == null || tab != Tab.PLAYLISTS || playlistPage != PlaylistPage.BROWSE) {
             return;
@@ -2508,6 +2554,36 @@ public class RadioScreen extends Screen {
 
     private float getVolume() {
         return isBlockMode() ? blockVolume : ClientAudioEngine.getInstance().getHandheldVolume();
+    }
+
+    private ItemStack getActiveHandheldRadioStack() {
+        if (isBlockMode() || minecraft == null || minecraft.player == null) {
+            return ItemStack.EMPTY;
+        }
+
+        if (hand != null) {
+            ItemStack held = minecraft.player.getItemInHand(hand);
+            if (held.is(ModItems.RADIO_ITEM)) {
+                return held;
+            }
+        }
+
+        String activeRadioId = ClientMediaRepository.getInstance().getActiveRadioId();
+        if (activeRadioId == null || activeRadioId.isBlank()) {
+            return ItemStack.EMPTY;
+        }
+
+        for (ItemStack stack : minecraft.player.getInventory().items) {
+            if (stack.is(ModItems.RADIO_ITEM) && activeRadioId.equals(RadioItem.getRadioId(stack))) {
+                return stack;
+            }
+        }
+        for (ItemStack stack : minecraft.player.getInventory().offhand) {
+            if (stack.is(ModItems.RADIO_ITEM) && activeRadioId.equals(RadioItem.getRadioId(stack))) {
+                return stack;
+            }
+        }
+        return ItemStack.EMPTY;
     }
 
     private RadioBlockEntity getBlockEntity() {
