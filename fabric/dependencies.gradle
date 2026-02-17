@@ -5,6 +5,8 @@ dependencies {
     }
     modImplementation("net.blay09.mods:kuma-api-fabric:${kuma_version}")
     modCompileOnly "com.terraformersmc:modmenu:$modmenu_version"
-    implementation("dev.arbjerg:lavaplayer:2.2.6")
-    implementation("dev.lavalink.youtube:v2:1.17.0")
+    shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
+        exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
+    }
+    shadowIn("dev.lavalink.youtube:v2:1.17.0")
 }

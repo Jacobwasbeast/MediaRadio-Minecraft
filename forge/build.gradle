@@ -3,6 +3,7 @@ plugins {
     id 'net.neoforged.moddev.legacyforge'
     id 'net.darkhax.curseforgegradle'
     id "com.modrinth.minotaur"
+    id "com.github.johnrengelman.shadow" version "8.1.1"
 }
 
 mixin {
@@ -48,15 +49,63 @@ legacyForge {
 
 sourceSets.main.resources.srcDir 'src/generated/resources'
 
+configurations {
+    shadowIn
+    implementation.extendsFrom shadowIn
+    additionalRuntimeClasspath.extendsFrom shadowIn
+}
+
 dependencies {
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
 }
 
 jar {
+    dependsOn(tasks.shadowJar)
+    from {
+        zipTree(tasks.shadowJar.archiveFile.get().asFile)
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     finalizedBy('reobfJar')
     manifest.attributes([
             "MixinConfigs": "${mod_id}.mixins.json,${mod_id}.forge.mixins.json"
     ])
+}
+
+shadowJar {
+    archiveClassifier.set("shadow")
+    configurations = [project.configurations.shadowIn]
+
+    relocate 'org.json', "${project.group}.${mod_id}.shadow.org.json"
+    relocate 'org.slf4j', "${project.group}.${mod_id}.shadow.org.slf4j"
+    relocate 'certificates', "${project.group}.${mod_id}.shadow.certificates"
+    relocate 'com.fasterxml', "${project.group}.${mod_id}.shadow.com.fasterxml"
+    relocate 'org.jsoup', "${project.group}.${mod_id}.shadow.org.jsoup"
+    relocate 'mozilla', "${project.group}.${mod_id}.shadow.mozilla"
+    relocate 'net.iharder', "${project.group}.${mod_id}.shadow.net.iharder"
+    relocate 'com.sedmelluq.lava', "${project.group}.${mod_id}.shadow.com.sedmelluq.lava"
+    relocate 'org.apache.http', "${project.group}.${mod_id}.shadow.org.apache.http"
+    relocate('org.apache.commons', "${project.group}.${mod_id}.shadow.org.apache.commons") {
+        include 'org.apache.commons.logging.**'
+        include 'org.apache.commons.io.**'
+        include 'org.apache.commons.codec.**'
+    }
+    relocate 'com.github', "${project.group}.${mod_id}.shadow.com.github"
+    relocate 'com.alibaba', "${project.group}.${mod_id}.shadow.com.alibaba"
+    relocate 'com.mpatric', "${project.group}.${mod_id}.shadow.com.mpatric"
+    relocate('com.sedmelluq.discord.lavaplayer', "${project.group}.${mod_id}.shadow.com.sedmelluq.discord.lavaplayer") {
+        exclude 'com.sedmelluq.discord.lavaplayer.natives.**'
+    }
+
+    mergeServiceFiles {
+        relocate 'javax.ws.rs.ext', "${project.group}.${mod_id}.shadow.javax.ws.rs.ext"
+        relocate 'org.glassfish.jersey.internal.spi', "${project.group}.${mod_id}.shadow.org.glassfish.jersey.internal.spi"
+    }
+
+    relocate 'ibxm', "${project.group}.${mod_id}.shadow.ibxm"
+    relocate 'net.sourceforge.jaad', "${project.group}.${mod_id}.shadow.net.sourceforge.jaad"
+    relocate 'org.mozilla.javascript', "${project.group}.${mod_id}.shadow.org.mozilla.javascript"
+    relocate 'org.mozilla.classfile', "${project.group}.${mod_id}.shadow.org.mozilla.classfile"
+    relocate 'dev.lavalink.youtube', "${project.group}.${mod_id}.shadow.dev.lavalink.youtube"
 }
 
 apply from: rootProject.file('repositories.gradle')

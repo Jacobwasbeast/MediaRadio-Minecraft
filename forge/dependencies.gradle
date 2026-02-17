@@ -1,8 +1,18 @@
 dependencies {
-    implementation("net.blay09.mods:balm-forge:${balm_version}") {
+    modImplementation("net.blay09.mods:balm-forge:${balm_version}") {
         changing = balm_version.contains("SNAPSHOT")
     }
-    implementation("net.blay09.mods:kuma-api-forge:${kuma_version}")
-    implementation("dev.arbjerg:lavaplayer:2.2.6")
-    implementation("dev.lavalink.youtube:v2:1.17.0")
+    modImplementation("net.blay09.mods:kuma-api-forge:${kuma_version}")
+
+    // Keep compile/runtime resolution in Forge and Common.
+    shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
+        exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
+    }
+    shadowIn("dev.lavalink.youtube:v2:1.17.0")
+
+    // Ensure LegacyForge dev runs include these on clientLegacyClasspath.
+    // Without this, Forge can miss Lavaplayer classes/natives at runtime.
+    additionalRuntimeClasspath("dev.arbjerg:lavaplayer:2.2.6")
+    additionalRuntimeClasspath("dev.arbjerg:lavaplayer-natives:2.2.6")
+    additionalRuntimeClasspath("dev.lavalink.youtube:v2:1.17.0")
 }

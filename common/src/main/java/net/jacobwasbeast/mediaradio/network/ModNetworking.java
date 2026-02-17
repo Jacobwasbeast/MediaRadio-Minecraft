@@ -1,7 +1,6 @@
 package net.jacobwasbeast.mediaradio.network;
 
 import net.blay09.mods.balm.api.Balm;
-import net.blay09.mods.balm.api.BalmEnvironment;
 import net.blay09.mods.balm.api.network.BalmNetworking;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
@@ -27,7 +26,7 @@ public class ModNetworking {
                 ClientboundSharedMediaMessage::encode,
                 ClientboundSharedMediaMessage::new,
                 (player, message) -> {
-                    if (Balm.getEnvironment() != BalmEnvironment.CLIENT) {
+                    if (!Balm.getProxy().isClient()) {
                         return;
                     }
                     try {
@@ -45,7 +44,7 @@ public class ModNetworking {
                 ClientboundRadioStateMessage::encode,
                 ClientboundRadioStateMessage::new,
                 (player, message) -> {
-                    if (Balm.getEnvironment() != BalmEnvironment.CLIENT) {
+                    if (!Balm.getProxy().isClient()) {
                         return;
                     }
                     try {

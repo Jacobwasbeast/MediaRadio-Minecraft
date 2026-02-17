@@ -33,6 +33,7 @@ Media Radio is a multi-loader Minecraft mod for **1.20.1** that adds a functiona
 
 - Supports direct URLs/files and YouTube-driven flows in UI.
 - YouTube behavior can change when upstream extractor/provider APIs change.
+- Third-party dependency and runtime native-source notices are documented in `THIRD_PARTY_NOTICES.md`.
 
 ## Crafting
 

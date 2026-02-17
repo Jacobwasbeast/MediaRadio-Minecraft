@@ -1,7 +1,6 @@
 package net.jacobwasbeast.mediaradio.forge;
 
 import net.blay09.mods.balm.api.Balm;
-import net.blay09.mods.balm.api.EmptyLoadContext;
 import net.blay09.mods.balm.api.client.BalmClient;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.client.MediaRadioClient;
@@ -14,8 +13,8 @@ import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 public class ForgeMediaRadio {
 
     public ForgeMediaRadio(FMLJavaModLoadingContext context) {
-        Balm.initializeMod(MediaRadio.MOD_ID, EmptyLoadContext.INSTANCE, MediaRadio::initialize);
+        Balm.initialize(MediaRadio.MOD_ID, MediaRadio::initialize);
         DistExecutor.runWhenOn(Dist.CLIENT,
-                () -> () -> BalmClient.initializeMod(MediaRadio.MOD_ID, EmptyLoadContext.INSTANCE, MediaRadioClient::initialize));
+                () -> () -> BalmClient.initialize(MediaRadio.MOD_ID, MediaRadioClient::initialize));
     }
 }

@@ -12,6 +12,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
+import net.jacobwasbeast.mediaradio.client.audio.LavaPlayerNativeLoader;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
 import net.jacobwasbeast.mediaradio.client.render.RadioBlockEntityRenderer;
 import net.jacobwasbeast.mediaradio.client.screen.RadioScreen;
@@ -30,9 +31,9 @@ public class MediaRadioClient {
     public static void initialize() {
         ModKeyMappings.initialize();
         ClientMediaRepository.initialize();
+        LavaPlayerNativeLoader.initialize();
 
         BalmClient.getRenderers().registerBlockEntityRenderer(
-                MediaRadio.id("radio_block_entity"),
                 () -> ModBlockEntities.RADIO_BLOCK_ENTITY.get(),
                 RadioBlockEntityRenderer::new
         );
