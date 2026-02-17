@@ -25,6 +25,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ClientAudioEngine {
 
     private static final ClientAudioEngine INSTANCE = new ClientAudioEngine();
+    private static final double EXTERNAL_POSITION_SMOOTHING_HZ = 12.0D;
+    private static final double EXTERNAL_POSITION_TELEPORT_SNAP_DISTANCE_SQR = 64.0D;
+    private static final double EXTERNAL_POSITION_MAX_DT_SECONDS = 0.1D;
 
     private final Map<BlockPos, RadioAudioChannel> blockChannels = new ConcurrentHashMap<>();
     private final Map<BlockPos, Integer> blockEndSuppressTicks = new ConcurrentHashMap<>();
@@ -953,11 +956,17 @@ public class ClientAudioEngine {
     }
 
     private void registerExternalContext(String radioId, int contraptionEntityId, BlockPos localPos) {
-        ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos);
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.level != null) {
-            context.lastSeenGameTick = minecraft.level.getGameTime();
+        long nowTick = minecraft.level == null ? 0L : minecraft.level.getGameTime();
+        ExternalRadioContext existing = externalContexts.get(radioId);
+        if (existing != null && existing.matches(contraptionEntityId, localPos)) {
+            existing.lastSeenGameTick = nowTick;
+            externalRadioIds.add(radioId);
+            return;
         }
+
+        ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos);
+        context.lastSeenGameTick = nowTick;
         externalContexts.put(radioId, context);
         externalRadioIds.add(radioId);
     }
@@ -1074,8 +1083,39 @@ public class ClientAudioEngine {
                 }
             }
         }
-        context.lastKnownPos = position;
-        return position;
+
+        long nowNanos = System.nanoTime();
+        Vec3 smoothed = context.smoothedPos;
+        if (smoothed == null) {
+            context.smoothedPos = position;
+            context.lastKnownPos = position;
+            context.lastSmoothNanos = nowNanos;
+            return position;
+        }
+
+        if (smoothed.distanceToSqr(position) >= EXTERNAL_POSITION_TELEPORT_SNAP_DISTANCE_SQR) {
+            context.smoothedPos = position;
+            context.lastKnownPos = position;
+            context.lastSmoothNanos = nowNanos;
+            return position;
+        }
+
+        long lastSmoothNanos = context.lastSmoothNanos;
+        context.lastSmoothNanos = nowNanos;
+        if (lastSmoothNanos <= 0L) {
+            context.smoothedPos = position;
+            context.lastKnownPos = position;
+            return position;
+        }
+
+        double dtSeconds = (nowNanos - lastSmoothNanos) / 1_000_000_000.0D;
+        dtSeconds = Math.max(0.0D, Math.min(EXTERNAL_POSITION_MAX_DT_SECONDS, dtSeconds));
+        double alpha = 1.0D - Math.exp(-EXTERNAL_POSITION_SMOOTHING_HZ * dtSeconds);
+        alpha = Math.max(0.0D, Math.min(1.0D, alpha));
+        Vec3 filtered = smoothed.lerp(position, alpha);
+        context.smoothedPos = filtered;
+        context.lastKnownPos = filtered;
+        return filtered;
     }
 
     private void persistRuntimeToSession(Minecraft minecraft, HandheldSession session) {
@@ -1495,11 +1535,23 @@ public class ClientAudioEngine {
         private final int contraptionEntityId;
         private final BlockPos localPos;
         private volatile Vec3 lastKnownPos = Vec3.ZERO;
+        private volatile Vec3 smoothedPos;
+        private volatile long lastSmoothNanos;
         private volatile long lastSeenGameTick;
 
         private ExternalRadioContext(int contraptionEntityId, BlockPos localPos) {
             this.contraptionEntityId = contraptionEntityId;
             this.localPos = localPos;
+        }
+
+        private boolean matches(int entityId, BlockPos blockPos) {
+            if (this.contraptionEntityId != entityId) {
+                return false;
+            }
+            if (this.localPos == null) {
+                return blockPos == null;
+            }
+            return this.localPos.equals(blockPos);
         }
     }
 
