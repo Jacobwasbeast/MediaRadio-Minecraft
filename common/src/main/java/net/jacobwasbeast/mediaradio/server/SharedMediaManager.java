@@ -245,7 +245,13 @@ public class SharedMediaManager {
         long position = runtimeData.currentPositionMs(state);
         String queueForPacket = queueStateForPacket(state.queueStateJson);
         boolean contextActive = shouldBroadcastHandheldContext(player, radioId, state);
-        boolean seekEvent = previousState != null && state.seekSerial != previousSeekSerial;
+        boolean naturalLoopRestart = previousState != null
+                && previousState.playing
+                && state.playing
+                && sameTrack(previousState.url, state.url)
+                && previousPosition >= 2_000L
+                && position + 1_250L < previousPosition;
+        boolean seekEvent = (previousState != null && state.seekSerial != previousSeekSerial) || naturalLoopRestart;
         boolean forcePositionSync = seekEvent
                 || previousState == null
                 || previousState.playing != state.playing
