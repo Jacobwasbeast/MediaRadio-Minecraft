@@ -71,6 +71,17 @@ jar {
     ])
 }
 
+tasks.register('noShadowJar', Jar) {
+    archiveClassifier.set("no-shadow")
+    from(sourceSets.main.output)
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest.attributes([
+            "MixinConfigs": "${mod_id}.mixins.json,${mod_id}.forge.mixins.json"
+    ])
+}
+
+build.dependsOn(tasks.named('noShadowJar'))
+
 shadowJar {
     archiveClassifier.set("shadow")
     configurations = [project.configurations.shadowIn]

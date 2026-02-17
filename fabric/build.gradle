@@ -97,6 +97,14 @@ remapJar {
     dependsOn shadowJar
 }
 
+tasks.register('remapNoShadowJar', net.fabricmc.loom.task.RemapJarTask) {
+    dependsOn tasks.jar
+    inputFile.set(tasks.jar.archiveFile)
+    archiveClassifier.set("no-shadow")
+}
+
+build.dependsOn(tasks.named('remapNoShadowJar'))
+
 components.java {
     withVariantsFromConfiguration(project.configurations.shadowRuntimeElements) {
         skip()
