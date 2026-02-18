@@ -11,14 +11,21 @@ import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.texture.MissingTextureAtlasSprite;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public final class RadioHeldOverlayRenderer {
 
     private static final int PANEL_MIN_W = 168;
-    private static final int PANEL_H = 62;
+    private static final int PANEL_MIN_H = 62;
     private static final int THUMB = 42;
     private static final int PANEL_MARGIN = 8;
     private static final int PANEL_INNER_PADDING = 6;
     private static final int TEXT_GAP = 6;
+    private static final int LINE_HEIGHT = 10;
+    private static final int TEXT_MAX_WIDTH = 150;
+    private static final int TITLE_MAX_LINES = 3;
+    private static final int ARTIST_MAX_LINES = 2;
 
     private RadioHeldOverlayRenderer() {
     }
@@ -77,32 +84,54 @@ public final class RadioHeldOverlayRenderer {
         String time = dur > 0L ? (formatTime(pos) + " / " + formatTime(dur)) : formatTime(pos);
         Font font = minecraft.font;
 
+        int fixedWidth = (PANEL_INNER_PADDING * 2) + THUMB + TEXT_GAP;
+        int textMaxWidth = Math.max(80, Math.min(TEXT_MAX_WIDTH, guiGraphics.guiWidth() - (PANEL_MARGIN * 2) - fixedWidth));
+        int textMinWidth = Math.max(80, Math.min(textMaxWidth, 100));
+        int desiredTextWidth = Math.max(
+                Math.max(font.width(state), font.width(time)),
+                Math.max(font.width(title), font.width(artist))
+        );
+        int textWidth = Math.max(textMinWidth, Math.min(textMaxWidth, desiredTextWidth));
+        int panelW = Math.max(PANEL_MIN_W, fixedWidth + textWidth);
         int panelMaxW = Math.max(PANEL_MIN_W, guiGraphics.guiWidth() - (PANEL_MARGIN * 2));
-        int desiredTextW = Math.max(
-                Math.max(font.width(state), font.width(title)),
-                Math.max(font.width(artist), font.width(time))
-        );
-        int panelW = Math.min(
-                panelMaxW,
-                Math.max(PANEL_MIN_W, (PANEL_INNER_PADDING * 2) + THUMB + TEXT_GAP + desiredTextW)
-        );
+        panelW = Math.min(panelW, panelMaxW);
+        textWidth = Math.max(8, panelW - fixedWidth);
+
+        List<String> titleLines = wrapToWidth(font, title, textWidth, TITLE_MAX_LINES);
+        List<String> artistLines = wrapToWidth(font, artist, textWidth, ARTIST_MAX_LINES);
+        int textLineCount = 2 + titleLines.size() + artistLines.size();
+        int contentHeight = Math.max(THUMB, textLineCount * LINE_HEIGHT);
+        int panelH = Math.max(PANEL_MIN_H, (PANEL_INNER_PADDING * 2) + contentHeight);
+        panelH = Math.min(panelH, Math.max(PANEL_MIN_H, guiGraphics.guiHeight() - (PANEL_MARGIN * 2)));
+
         int x = guiGraphics.guiWidth() - panelW - PANEL_MARGIN;
         int y = PANEL_MARGIN;
-        guiGraphics.fill(x, y, x + panelW, y + PANEL_H, 0xC0101720);
+        guiGraphics.fill(x, y, x + panelW, y + panelH, 0xC0101720);
         guiGraphics.fill(x, y, x + panelW, y + 1, 0xFF4F7390);
-        guiGraphics.fill(x, y + PANEL_H - 1, x + panelW, y + PANEL_H, 0xFF4F7390);
-        guiGraphics.fill(x, y, x + 1, y + PANEL_H, 0xFF4F7390);
-        guiGraphics.fill(x + panelW - 1, y, x + panelW, y + PANEL_H, 0xFF4F7390);
+        guiGraphics.fill(x, y + panelH - 1, x + panelW, y + panelH, 0xFF4F7390);
+        guiGraphics.fill(x, y, x + 1, y + panelH, 0xFF4F7390);
+        guiGraphics.fill(x + panelW - 1, y, x + panelW, y + panelH, 0xFF4F7390);
 
-        drawThumb(guiGraphics, displayInfo.thumbnail(), x + PANEL_INNER_PADDING, y + 10, THUMB);
+        int thumbX = x + PANEL_INNER_PADDING;
+        int thumbY = y + PANEL_INNER_PADDING + Math.max(0, (contentHeight - THUMB) / 2);
+        drawThumb(guiGraphics, displayInfo.thumbnail(), thumbX, thumbY, THUMB);
 
-        int tx = x + PANEL_INNER_PADDING + THUMB + TEXT_GAP;
-        int textMaxWidth = Math.max(8, (x + panelW - PANEL_INNER_PADDING) - tx);
-        guiGraphics.enableScissor(tx, y + 8, x + panelW - PANEL_INNER_PADDING, y + PANEL_H - 4);
-        guiGraphics.drawString(font, trimToWidth(font, state, textMaxWidth), tx, y + 10, 0xFF69E3A3, false);
-        guiGraphics.drawString(font, trimToWidth(font, title, textMaxWidth), tx, y + 22, 0xFFEAF4FF, false);
-        guiGraphics.drawString(font, trimToWidth(font, artist, textMaxWidth), tx, y + 33, 0xFFA7BFD3, false);
-        guiGraphics.drawString(font, trimToWidth(font, time, textMaxWidth), tx, y + 45, 0xFF69CFFF, false);
+        int tx = thumbX + THUMB + TEXT_GAP;
+        int ty = y + PANEL_INNER_PADDING;
+        int textRight = x + panelW - PANEL_INNER_PADDING;
+        guiGraphics.enableScissor(tx, y + PANEL_INNER_PADDING, textRight, y + panelH - PANEL_INNER_PADDING);
+        guiGraphics.drawString(font, trimToWidth(font, state, textWidth), tx, ty, 0xFF69E3A3, false);
+        ty += LINE_HEIGHT;
+        guiGraphics.drawString(font, trimToWidth(font, time, textWidth), tx, ty, 0xFF69CFFF, false);
+        ty += LINE_HEIGHT;
+        for (String line : titleLines) {
+            guiGraphics.drawString(font, line, tx, ty, 0xFFEAF4FF, false);
+            ty += LINE_HEIGHT;
+        }
+        for (String line : artistLines) {
+            guiGraphics.drawString(font, line, tx, ty, 0xFFA7BFD3, false);
+            ty += LINE_HEIGHT;
+        }
         guiGraphics.disableScissor();
     }
 
@@ -127,16 +156,6 @@ public final class RadioHeldOverlayRenderer {
         guiGraphics.disableScissor();
     }
 
-    private static String trim(String value, int maxLength) {
-        if (value == null) {
-            return "";
-        }
-        if (value.length() <= maxLength) {
-            return value;
-        }
-        return value.substring(0, Math.max(0, maxLength - 3)) + "...";
-    }
-
     private static String trimToWidth(Font font, String value, int maxWidth) {
         if (font == null || value == null || value.isBlank() || maxWidth <= 0) {
             return value == null ? "" : value;
@@ -159,6 +178,65 @@ public final class RadioHeldOverlayRenderer {
             }
         }
         return builder + ellipsis;
+    }
+
+    private static List<String> wrapToWidth(Font font, String value, int maxWidth, int maxLines) {
+        List<String> lines = new ArrayList<>();
+        if (font == null || maxWidth <= 0 || maxLines <= 0) {
+            lines.add(value == null ? "" : value);
+            return lines;
+        }
+
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.isBlank()) {
+            lines.add("");
+            return lines;
+        }
+
+        String[] words = normalized.split("\\s+");
+        StringBuilder current = new StringBuilder();
+        int wordIndex = 0;
+        boolean truncated = false;
+        while (wordIndex < words.length) {
+            String word = words[wordIndex];
+            String candidate = current.length() == 0 ? word : current + " " + word;
+            if (font.width(candidate) <= maxWidth) {
+                current.setLength(0);
+                current.append(candidate);
+                wordIndex++;
+                continue;
+            }
+
+            if (current.length() == 0) {
+                lines.add(trimToWidth(font, word, maxWidth));
+                wordIndex++;
+            } else {
+                lines.add(current.toString());
+                current.setLength(0);
+            }
+
+            if (lines.size() >= maxLines) {
+                truncated = wordIndex < words.length;
+                break;
+            }
+        }
+
+        if (lines.size() < maxLines && current.length() > 0) {
+            lines.add(current.toString());
+        } else if (current.length() > 0) {
+            truncated = true;
+        }
+
+        if (lines.size() > maxLines) {
+            lines = new ArrayList<>(lines.subList(0, maxLines));
+            truncated = true;
+        }
+
+        if (truncated && !lines.isEmpty()) {
+            int last = lines.size() - 1;
+            lines.set(last, trimToWidth(font, lines.get(last) + "...", maxWidth));
+        }
+        return lines;
     }
 
     private static String formatTime(long ms) {
