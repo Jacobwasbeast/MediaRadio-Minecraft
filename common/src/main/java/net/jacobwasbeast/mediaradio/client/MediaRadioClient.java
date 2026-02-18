@@ -209,19 +209,30 @@ public class MediaRadioClient {
     }
 
     private static float offhandOccupiedPredicate(ItemStack stack, net.minecraft.client.multiplayer.ClientLevel level, LivingEntity entity, int seed) {
-        if (entity == null) {
+        if (entity == null || !stack.is(ModItems.RADIO_ITEM)) {
             return 0f;
         }
 
-        // Only apply this transform to the actual main-hand radio stack, not any other radio stack
-        // in offhand/inventory. This keeps per-mode model sizing and pose selection stable.
-        if (entity.getMainHandItem() != stack) {
+        ItemStack main = entity.getMainHandItem();
+        if (!main.is(ModItems.RADIO_ITEM)) {
             return 0f;
         }
 
-        boolean mainHandRadio = stack.is(ModItems.RADIO_ITEM);
         boolean offHandOccupied = !entity.getOffhandItem().isEmpty();
+        if (!offHandOccupied) {
+            return 0f;
+        }
 
-        return mainHandRadio && offHandOccupied ? 1f : 0f;
+        // In larger modpacks, some render hooks pass copied ItemStacks.
+        // Match by radio id first, then by item+tag as fallback.
+        String stackRadioId = RadioItem.getRadioId(stack);
+        String mainRadioId = RadioItem.getRadioId(main);
+        if (!stackRadioId.isBlank() && stackRadioId.equals(mainRadioId)) {
+            return 1f;
+        }
+        if (main == stack) {
+            return 1f;
+        }
+        return ItemStack.isSameItemSameTags(main, stack) ? 1f : 0f;
     }
 }

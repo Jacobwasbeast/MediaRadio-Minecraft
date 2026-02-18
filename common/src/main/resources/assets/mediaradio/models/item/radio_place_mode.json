@@ -1,7 +1,7 @@
 {
   "parent": "mediaradio:item/radio_handheld",
+  "gui_light": "front",
   "display": {
-  	"gui_light": "front",
     "thirdperson_righthand": {
       "rotation": [14, 62, 20],
       "translation": [0.0, 0.85, 0.0],

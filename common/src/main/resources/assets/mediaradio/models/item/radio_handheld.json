@@ -1,7 +1,7 @@
 {
   "parent": "mediaradio:block/radio_block",
+  "gui_light": "front",
   "display": {
-  	"gui_light": "front",
     "thirdperson_righthand": {
       "rotation": [2, 88, 2],
       "translation": [0.0, 1.0, 0.0],
