@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0
+
+- Fixed Create contraption playback distance limits so audio is no longer global.
+- Fixed held item transform compatibility issues in larger modpacks.
+- Added server-side playback simulation for radios without an active owner.
+- Fixed UI library text alignment and textbox positioning issues.
+- Added configurable client options for Media Radio settings placement and behavior.
+- Fixed HUD media stats clipping and improved overlay sizing for longer content.
+
 ## 1.1.0
 
 - Added Create-focused playback support improvements and contraption audio behavior fixes.
