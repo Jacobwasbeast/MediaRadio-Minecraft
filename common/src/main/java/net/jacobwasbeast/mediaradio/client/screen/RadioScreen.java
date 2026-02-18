@@ -2783,11 +2783,13 @@ public class RadioScreen extends Screen {
             guiGraphics.fill(getX(), getY() + height - 1, getX() + width, getY() + height, border);
             guiGraphics.fill(getX(), getY(), getX() + 1, getY() + height, border);
             guiGraphics.fill(getX() + width - 1, getY(), getX() + width, getY() + height, border);
+            // EditBox without vanilla border starts text at the hard left edge; apply inner padding.
+            int textXOffset = 3;
             // EditBox without vanilla border renders text too high; center it in our custom field.
             int textYOffset = Math.max(0, (height - 8) / 2 - 1);
             guiGraphics.pose().pushPose();
-            guiGraphics.pose().translate(0.0f, textYOffset, 0.0f);
-            super.renderWidget(guiGraphics, mouseX, mouseY, partialTick);
+            guiGraphics.pose().translate(textXOffset, textYOffset, 0.0f);
+            super.renderWidget(guiGraphics, mouseX - textXOffset, mouseY - textYOffset, partialTick);
             guiGraphics.pose().popPose();
         }
     }
