@@ -70,6 +70,24 @@ public class MediaRadioAudioSettingsScreen extends OptionsSubScreen {
                         (button, value) -> settings.setHearInventoryPlayerRadios(value)
                 ));
 
+        y += rowGap;
+        addRenderableWidget(CycleButton.<ClientAudioSettings.SoundOptionsButtonPosition>builder(position -> Component.literal(position.label()))
+                .withValues(
+                        ClientAudioSettings.SoundOptionsButtonPosition.TOP_LEFT,
+                        ClientAudioSettings.SoundOptionsButtonPosition.TOP_RIGHT,
+                        ClientAudioSettings.SoundOptionsButtonPosition.BOTTOM_LEFT,
+                        ClientAudioSettings.SoundOptionsButtonPosition.BOTTOM_RIGHT
+                )
+                .withInitialValue(settings.soundOptionsButtonPosition())
+                .create(
+                        full,
+                        y,
+                        310,
+                        20,
+                        Component.literal("Sound Options Button Position"),
+                        (button, value) -> settings.setSoundOptionsButtonPosition(value)
+                ));
+
         addRenderableWidget(Button.builder(CommonComponents.GUI_DONE, button -> onClose())
                 .bounds(width / 2 - 100, height - 27, 200, 20)
                 .build());

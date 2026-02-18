@@ -18,6 +18,7 @@ public class ClientAudioSettings {
     private float otherPlayersHandheldVolume = 1.0f;
     private float blockRadioVolume = 1.0f;
     private boolean hearInventoryPlayerRadios = true;
+    private SoundOptionsButtonPosition soundOptionsButtonPosition = SoundOptionsButtonPosition.BOTTOM_LEFT;
 
     public static ClientAudioSettings get() {
         return INSTANCE;
@@ -42,6 +43,7 @@ public class ClientAudioSettings {
             otherPlayersHandheldVolume = clampVolume(model.otherPlayersHandheldVolume);
             blockRadioVolume = clampVolume(model.blockRadioVolume);
             hearInventoryPlayerRadios = model.hearInventoryPlayerRadios == null ? true : model.hearInventoryPlayerRadios;
+            soundOptionsButtonPosition = SoundOptionsButtonPosition.fromId(model.soundOptionsButtonPosition);
         } catch (IOException | JsonSyntaxException ignored) {
         }
     }
@@ -82,6 +84,15 @@ public class ClientAudioSettings {
         save();
     }
 
+    public synchronized SoundOptionsButtonPosition soundOptionsButtonPosition() {
+        return soundOptionsButtonPosition;
+    }
+
+    public synchronized void setSoundOptionsButtonPosition(SoundOptionsButtonPosition value) {
+        soundOptionsButtonPosition = value == null ? SoundOptionsButtonPosition.BOTTOM_LEFT : value;
+        save();
+    }
+
     private synchronized void save() {
         Path path = configPath();
         if (path == null) {
@@ -94,6 +105,7 @@ public class ClientAudioSettings {
             model.otherPlayersHandheldVolume = otherPlayersHandheldVolume;
             model.blockRadioVolume = blockRadioVolume;
             model.hearInventoryPlayerRadios = hearInventoryPlayerRadios;
+            model.soundOptionsButtonPosition = soundOptionsButtonPosition.id();
             Files.writeString(path, GSON.toJson(model));
         } catch (IOException ignored) {
         }
@@ -116,5 +128,41 @@ public class ClientAudioSettings {
         private float otherPlayersHandheldVolume = 1.0f;
         private float blockRadioVolume = 1.0f;
         private Boolean hearInventoryPlayerRadios = true;
+        private String soundOptionsButtonPosition = SoundOptionsButtonPosition.BOTTOM_LEFT.id();
+    }
+
+    public enum SoundOptionsButtonPosition {
+        TOP_LEFT("top_left", "Top Left"),
+        TOP_RIGHT("top_right", "Top Right"),
+        BOTTOM_LEFT("bottom_left", "Bottom Left"),
+        BOTTOM_RIGHT("bottom_right", "Bottom Right");
+
+        private final String id;
+        private final String label;
+
+        SoundOptionsButtonPosition(String id, String label) {
+            this.id = id;
+            this.label = label;
+        }
+
+        public String id() {
+            return id;
+        }
+
+        public String label() {
+            return label;
+        }
+
+        public static SoundOptionsButtonPosition fromId(String id) {
+            if (id == null || id.isBlank()) {
+                return BOTTOM_LEFT;
+            }
+            for (SoundOptionsButtonPosition value : values()) {
+                if (value.id.equalsIgnoreCase(id)) {
+                    return value;
+                }
+            }
+            return BOTTOM_LEFT;
+        }
     }
 }

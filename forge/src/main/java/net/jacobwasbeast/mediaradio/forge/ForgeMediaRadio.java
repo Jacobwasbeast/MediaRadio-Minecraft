@@ -4,6 +4,7 @@ import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.client.BalmClient;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.client.MediaRadioClient;
+import net.jacobwasbeast.mediaradio.forge.client.ForgeConfigScreenIntegration;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.fml.common.Mod;
@@ -18,7 +19,12 @@ public class ForgeMediaRadio {
         Balm.initialize(MediaRadio.MOD_ID, MediaRadio::initialize);
         context.getModEventBus().addListener(this::onCommonSetup);
         DistExecutor.runWhenOn(Dist.CLIENT,
-                () -> () -> BalmClient.initialize(MediaRadio.MOD_ID, MediaRadioClient::initialize));
+                () -> ForgeMediaRadio::initializeClient);
+    }
+
+    private static void initializeClient() {
+        BalmClient.initialize(MediaRadio.MOD_ID, MediaRadioClient::initialize);
+        ForgeConfigScreenIntegration.register();
     }
 
     private void onCommonSetup(FMLCommonSetupEvent event) {
