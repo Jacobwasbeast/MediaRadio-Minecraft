@@ -176,12 +176,16 @@ public class LavaPlayerAccess {
     public OpenedTrack openTrack(AudioTrack sourceTrack, long positionMs) {
         AudioPlayer audioPlayer = audioPlayerManager.createPlayer();
         AudioTrack track = sourceTrack.makeClone();
-        if (positionMs > 0L) {
-            track.setPosition(positionMs);
-        }
         long durationMs = sourceTrack.getDuration();
         if (durationMs <= 0L) {
             durationMs = track.getDuration();
+        }
+        long normalizedPositionMs = Math.max(0L, positionMs);
+        if (durationMs > 0L && durationMs != Long.MAX_VALUE && normalizedPositionMs >= durationMs) {
+            normalizedPositionMs = normalizedPositionMs % durationMs;
+        }
+        if (normalizedPositionMs > 0L) {
+            track.setPosition(normalizedPositionMs);
         }
         audioPlayer.startTrack(track, false);
         AudioInputStream stream = AudioPlayerInputStream.createStream(audioPlayer, audioDataFormat, 3000L, true);

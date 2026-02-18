@@ -2675,6 +2675,9 @@ public class RadioScreen extends Screen {
             case UPDATE_QUEUE_STATE -> {
                 // Queue state is already maintained in the shared client repository.
             }
+            case SYNC_RUNTIME -> {
+                // Runtime sync is server-authoritative bookkeeping only.
+            }
         }
     }
 

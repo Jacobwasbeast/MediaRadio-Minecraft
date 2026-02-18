@@ -11,6 +11,7 @@ public record ServerboundHandheldStateMessage(
         String queueStateJson,
         float volume,
         long positionMs,
+        long trackDurationMs,
         int seekSerial,
         boolean playing,
         boolean allowInventoryBroadcast
@@ -29,6 +30,7 @@ public record ServerboundHandheldStateMessage(
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readFloat(),
                 friendlyByteBuf.readLong(),
+                friendlyByteBuf.readLong(),
                 friendlyByteBuf.readVarInt(),
                 friendlyByteBuf.readBoolean(),
                 friendlyByteBuf.readBoolean()
@@ -44,6 +46,7 @@ public record ServerboundHandheldStateMessage(
         friendlyByteBuf.writeUtf(queueStateJson, MAX_PACKET_STRING);
         friendlyByteBuf.writeFloat(volume);
         friendlyByteBuf.writeLong(positionMs);
+        friendlyByteBuf.writeLong(trackDurationMs);
         friendlyByteBuf.writeVarInt(Math.max(0, seekSerial));
         friendlyByteBuf.writeBoolean(playing);
         friendlyByteBuf.writeBoolean(allowInventoryBroadcast);

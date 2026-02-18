@@ -1,5 +1,7 @@
 package net.jacobwasbeast.mediaradio.server;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.event.TickPhase;
 import net.blay09.mods.balm.api.event.TickType;
@@ -31,8 +33,13 @@ public class SharedMediaManager {
     private static final long CHUNK_TTL_MS = 30_000L;
     private static final int MAX_QUEUE_STATE_RADIO_PACKET = 8_192;
     private static final int HANDHELD_PERIODIC_SYNC_INTERVAL_TICKS = 40;
+    private static final int UNOWNED_RUNTIME_SIMULATION_INTERVAL_TICKS = 20;
+    private static final long UNOWNED_RUNTIME_STALE_MS = 3_000L;
+    private static final long TRACK_END_EPSILON_MS = 250L;
+    private static final int MAX_SIMULATED_TRANSITIONS_PER_TICK = 128;
     private static final double HANDHELD_LISTENER_SYNC_RANGE_SQR = 96.0D * 96.0D;
     private static final double BLOCK_CONTROL_MAX_DISTANCE_SQR = 24.0D * 24.0D;
+    private static final Gson GSON = new Gson();
     private static final Map<String, ChunkAccumulator> CHUNK_UPLOADS = new HashMap<>();
     private static final Map<String, HandheldListenerContext> ACTIVE_HANDHELD_LISTENER_CONTEXTS = new HashMap<>();
 
@@ -42,8 +49,10 @@ public class SharedMediaManager {
                     ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshot(event.getPlayer().server));
                     syncActiveHandheldRadiosToPlayer(event.getPlayer());
                 });
-        Balm.getEvents().onTickEvent(TickType.Server, TickPhase.End,
-                (net.blay09.mods.balm.api.event.ServerTickHandler) SharedMediaManager::syncActiveHandheldRadiosToNearbyPlayers);
+        Balm.getEvents().onTickEvent(TickType.Server, TickPhase.End, (net.blay09.mods.balm.api.event.ServerTickHandler) server -> {
+            simulateUnownedRadioPlayback(server);
+            syncActiveHandheldRadiosToNearbyPlayers(server);
+        });
     }
 
     public static String getSnapshot(MinecraftServer server) {
@@ -144,6 +153,15 @@ public class SharedMediaManager {
                 runtimeState.artist = safe(message.artist());
                 runtimeState.thumbnail = safe(message.thumbnail());
                 runtimeState.positionMs = 0L;
+                long incomingDurationMs = message.trackDurationMs();
+                if (incomingDurationMs > 0L) {
+                    runtimeState.trackDurationMs = incomingDurationMs;
+                    if (!runtimeState.url.isBlank()) {
+                        runtimeState.knownTrackDurationsMs.put(trackSyncKey(runtimeState.url), incomingDurationMs);
+                    }
+                } else {
+                    runtimeState.trackDurationMs = resolveTrackDurationMs(runtimeState, runtimeState.url);
+                }
                 runtimeState.playing = true;
                 runtimeState.updatedAtMs = now;
                 runtimeState.volume = Mth.clamp(message.volume(), 0f, 2f);
@@ -187,6 +205,7 @@ public class SharedMediaManager {
             case STOP -> {
                 runtimeState.playing = false;
                 runtimeState.positionMs = 0L;
+                runtimeState.trackDurationMs = -1L;
                 runtimeState.updatedAtMs = now;
                 if (radioBlockEntity != null) {
                     radioBlockEntity.stop();
@@ -205,6 +224,22 @@ public class SharedMediaManager {
                 if (radioBlockEntity != null) {
                     radioBlockEntity.seekTo(message.positionMs());
                 }
+            }
+            case SYNC_RUNTIME -> {
+                runtimeState.url = safe(message.url()).isBlank() ? runtimeState.url : safe(message.url());
+                runtimeState.title = safe(message.title()).isBlank() ? runtimeState.title : safe(message.title());
+                runtimeState.artist = safe(message.artist()).isBlank() ? runtimeState.artist : safe(message.artist());
+                runtimeState.thumbnail = safe(message.thumbnail()).isBlank() ? runtimeState.thumbnail : safe(message.thumbnail());
+                runtimeState.positionMs = Math.max(0L, message.positionMs());
+                long syncedDurationMs = message.trackDurationMs();
+                if (syncedDurationMs > 0L) {
+                    runtimeState.trackDurationMs = syncedDurationMs;
+                    if (!runtimeState.url.isBlank()) {
+                        runtimeState.knownTrackDurationsMs.put(trackSyncKey(runtimeState.url), syncedDurationMs);
+                    }
+                }
+                runtimeState.playing = true;
+                runtimeState.updatedAtMs = now;
             }
         }
 
@@ -236,6 +271,7 @@ public class SharedMediaManager {
                 message.queueStateJson(),
                 message.volume(),
                 message.positionMs(),
+                message.trackDurationMs(),
                 message.seekSerial(),
                 message.playing(),
                 message.allowInventoryBroadcast()
@@ -324,6 +360,26 @@ public class SharedMediaManager {
         }
         RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(server);
         RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
+        long nowMs = System.currentTimeMillis();
+        boolean changed = false;
+        if (state.playing && !safe(state.url).isBlank()) {
+            if (state.trackDurationMs <= 0L) {
+                long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
+                if (resolvedDurationMs > 0L) {
+                    state.trackDurationMs = resolvedDurationMs;
+                    changed = true;
+                }
+            }
+            long projectedPositionMs = runtimeData.currentPositionMs(state);
+            if (state.trackDurationMs > 0L && projectedPositionMs + TRACK_END_EPSILON_MS >= state.trackDurationMs) {
+                if (advanceUnownedPlaybackState(runtimeData, state, nowMs)) {
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            runtimeData.setDirty();
+        }
         long position = runtimeData.currentPositionMs(state);
         radioBlockEntity.setMedia(state.url, state.title, state.artist, state.thumbnail);
         radioBlockEntity.setQueueStateJson(state.queueStateJson);
@@ -515,6 +571,10 @@ public class SharedMediaManager {
         copy.queueStateJson = safe(source.queueStateJson);
         copy.volume = Mth.clamp(source.volume, 0f, 2f);
         copy.positionMs = Math.max(0L, source.positionMs);
+        copy.trackDurationMs = source.trackDurationMs;
+        copy.knownTrackDurationsMs = source.knownTrackDurationsMs == null
+                ? new HashMap<>()
+                : new HashMap<>(source.knownTrackDurationsMs);
         copy.seekSerial = Math.max(0, source.seekSerial);
         copy.playing = source.playing;
         copy.allowInventoryBroadcast = source.allowInventoryBroadcast;
@@ -711,6 +771,224 @@ public class SharedMediaManager {
         return !isHeldHandRadio(player, radioId) && hasRadioInInventory(player, radioId);
     }
 
+    private static void simulateUnownedRadioPlayback(MinecraftServer server) {
+        if (server == null || server.getTickCount() % UNOWNED_RUNTIME_SIMULATION_INTERVAL_TICKS != 0) {
+            return;
+        }
+
+        RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(server);
+        if (runtimeData.states().isEmpty()) {
+            return;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        boolean changedAny = false;
+        for (Map.Entry<String, RadioRuntimeStateSavedData.RadioRuntimeState> entry : runtimeData.states().entrySet()) {
+            String radioId = safe(entry.getKey());
+            RadioRuntimeStateSavedData.RadioRuntimeState state = entry.getValue();
+            if (radioId.isBlank() || state == null || !state.playing || safe(state.url).isBlank()) {
+                continue;
+            }
+            if (nowMs - Math.max(0L, state.updatedAtMs) < UNOWNED_RUNTIME_STALE_MS) {
+                continue;
+            }
+            if (state.trackDurationMs <= 0L) {
+                long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
+                if (resolvedDurationMs > 0L) {
+                    state.trackDurationMs = resolvedDurationMs;
+                    changedAny = true;
+                }
+            }
+            if (state.trackDurationMs <= 0L) {
+                continue;
+            }
+            if (advanceUnownedPlaybackState(runtimeData, state, nowMs)) {
+                changedAny = true;
+            }
+        }
+
+        if (changedAny) {
+            runtimeData.setDirty();
+        }
+    }
+
+    private static boolean advanceUnownedPlaybackState(
+            RadioRuntimeStateSavedData runtimeData,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            long nowMs
+    ) {
+        if (runtimeData == null || state == null || !state.playing || safe(state.url).isBlank()) {
+            return false;
+        }
+        long projectedPositionMs = runtimeData.currentPositionMs(state);
+        long currentDurationMs = state.trackDurationMs <= 0L ? resolveTrackDurationMs(state, state.url) : state.trackDurationMs;
+        if (currentDurationMs <= 0L || projectedPositionMs + TRACK_END_EPSILON_MS < currentDurationMs) {
+            return false;
+        }
+
+        QueueStatePayload payload = parseQueueState(state.queueStateJson);
+        if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            state.playing = false;
+            state.positionMs = 0L;
+            state.trackDurationMs = -1L;
+            state.url = "";
+            state.title = "";
+            state.artist = "";
+            state.thumbnail = "";
+            state.updatedAtMs = nowMs;
+            return true;
+        }
+
+        int currentIndex = resolveCurrentQueueIndex(payload, state.url);
+        if (currentIndex < 0 || currentIndex >= payload.entries.size()) {
+            return false;
+        }
+
+        long remainingMs = projectedPositionMs;
+        if (payload.loopMode == QueueLoopMode.ONE && currentDurationMs > 0L) {
+            long loopedPosition = remainingMs % currentDurationMs;
+            if (loopedPosition == Math.max(0L, state.positionMs)) {
+                return false;
+            }
+            state.positionMs = loopedPosition;
+            state.updatedAtMs = nowMs;
+            return true;
+        }
+
+        boolean changed = false;
+        int transitions = 0;
+        while (state.playing && transitions++ < MAX_SIMULATED_TRANSITIONS_PER_TICK) {
+            QueueMediaPayload currentEntry = payload.entries.get(currentIndex);
+            long durationMs = resolveTrackDurationMs(state, currentEntry.url);
+            if (durationMs <= 0L) {
+                break;
+            }
+            if (remainingMs + TRACK_END_EPSILON_MS < durationMs) {
+                break;
+            }
+            remainingMs = Math.max(0L, remainingMs - durationMs);
+
+            if (payload.loopMode == QueueLoopMode.ONE) {
+                changed = true;
+                continue;
+            }
+
+            int nextIndex = currentIndex + 1;
+            if (nextIndex >= payload.entries.size()) {
+                if (payload.loopMode == QueueLoopMode.ALL) {
+                    nextIndex = 0;
+                } else {
+                    payload.currentQueueItemId = safe(currentEntry.queueItemId);
+                    payload.queueIndex = currentIndex;
+                    state.queueStateJson = GSON.toJson(payload);
+                    state.playing = false;
+                    state.positionMs = 0L;
+                    state.trackDurationMs = -1L;
+                    state.url = "";
+                    state.title = "";
+                    state.artist = "";
+                    state.thumbnail = "";
+                    state.updatedAtMs = nowMs;
+                    return true;
+                }
+            }
+
+            currentIndex = nextIndex;
+            QueueMediaPayload nextEntry = payload.entries.get(currentIndex);
+            payload.currentQueueItemId = safe(nextEntry.queueItemId);
+            payload.queueIndex = currentIndex;
+            state.url = safe(nextEntry.url);
+            state.title = safe(nextEntry.title);
+            state.artist = safe(nextEntry.artist);
+            state.thumbnail = safe(nextEntry.thumbnail);
+            state.trackDurationMs = resolveTrackDurationMs(state, state.url);
+            changed = true;
+        }
+
+        long clampedPosition = Math.max(0L, remainingMs);
+        if (!changed && clampedPosition == Math.max(0L, state.positionMs)) {
+            return false;
+        }
+
+        state.positionMs = clampedPosition;
+        state.updatedAtMs = nowMs;
+        state.queueStateJson = GSON.toJson(payload);
+        if (state.trackDurationMs <= 0L && !state.url.isBlank()) {
+            state.trackDurationMs = resolveTrackDurationMs(state, state.url);
+        }
+        return true;
+    }
+
+    private static long resolveTrackDurationMs(RadioRuntimeStateSavedData.RadioRuntimeState state, String url) {
+        if (state == null || url == null || url.isBlank()) {
+            return -1L;
+        }
+        if (state.trackDurationMs > 0L && sameTrack(state.url, url)) {
+            return state.trackDurationMs;
+        }
+        if (state.knownTrackDurationsMs == null || state.knownTrackDurationsMs.isEmpty()) {
+            return -1L;
+        }
+        Long known = state.knownTrackDurationsMs.get(trackSyncKey(url));
+        if (known == null || known <= 0L || known == Long.MAX_VALUE) {
+            return -1L;
+        }
+        return known;
+    }
+
+    private static QueueStatePayload parseQueueState(String queueStateJson) {
+        String json = safe(queueStateJson);
+        if (json.isBlank()) {
+            return null;
+        }
+        try {
+            QueueStatePayload payload = GSON.fromJson(json, QueueStatePayload.class);
+            if (payload == null || payload.entries == null) {
+                return null;
+            }
+            payload.entries.removeIf(entry -> entry == null || safe(entry.url).isBlank());
+            if (payload.entries.isEmpty()) {
+                return null;
+            }
+            if (payload.loopMode == null) {
+                payload.loopMode = QueueLoopMode.ALL;
+            }
+            if (payload.currentQueueItemId == null) {
+                payload.currentQueueItemId = "";
+            }
+            return payload;
+        } catch (JsonSyntaxException ignored) {
+            return null;
+        }
+    }
+
+    private static int resolveCurrentQueueIndex(QueueStatePayload payload, String currentUrl) {
+        if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            return -1;
+        }
+        if (payload.currentQueueItemId != null && !payload.currentQueueItemId.isBlank()) {
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry != null && payload.currentQueueItemId.equals(safe(entry.queueItemId))) {
+                    return i;
+                }
+            }
+        }
+        if (payload.queueIndex >= 0 && payload.queueIndex < payload.entries.size()) {
+            return payload.queueIndex;
+        }
+        String url = safe(currentUrl);
+        if (!url.isBlank()) {
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry != null && sameTrack(url, entry.url)) {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
     private static boolean sameTrack(String left, String right) {
         return trackSyncKey(left).equals(trackSyncKey(right));
     }
@@ -773,6 +1051,27 @@ public class SharedMediaManager {
             return safe;
         }
         return "";
+    }
+
+    private static class QueueStatePayload {
+        private java.util.List<QueueMediaPayload> entries = new java.util.ArrayList<>();
+        private String currentQueueItemId = "";
+        private int queueIndex = -1;
+        private QueueLoopMode loopMode = QueueLoopMode.ALL;
+    }
+
+    private static class QueueMediaPayload {
+        private String queueItemId = "";
+        private String url = "";
+        private String title = "";
+        private String artist = "";
+        private String thumbnail = "";
+    }
+
+    private enum QueueLoopMode {
+        NONE,
+        ONE,
+        ALL
     }
 
     private static class ChunkAccumulator {

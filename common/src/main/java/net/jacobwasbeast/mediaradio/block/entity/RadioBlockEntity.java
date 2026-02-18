@@ -5,9 +5,11 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
+import net.jacobwasbeast.mediaradio.server.SharedMediaManager;
 
 public class RadioBlockEntity extends BlockEntity {
 
@@ -36,6 +38,7 @@ public class RadioBlockEntity extends BlockEntity {
     private int seekVersion;
     private float volume = 1.0f;
     private String queueStateJson = "";
+    private boolean pendingRuntimeStateApply;
 
     public RadioBlockEntity(BlockPos blockPos, BlockState blockState) {
         super(ModBlockEntities.RADIO_BLOCK_ENTITY.get(), blockPos, blockState);
@@ -207,11 +210,24 @@ public class RadioBlockEntity extends BlockEntity {
         seekVersion = Math.max(0, tag.getInt(TAG_SEEK_VERSION));
         volume = clamp(tag.getFloat(TAG_VOLUME), 0.0f, 2.0f);
         queueStateJson = safe(tag.getString(TAG_QUEUE_STATE));
+        pendingRuntimeStateApply = true;
     }
 
     @Override
     public CompoundTag getUpdateTag() {
         return saveWithoutMetadata();
+    }
+
+    public static void serverTick(Level level, BlockPos blockPos, BlockState blockState, RadioBlockEntity radioBlockEntity) {
+        radioBlockEntity.serverTick();
+    }
+
+    private void serverTick() {
+        if (!pendingRuntimeStateApply || level == null || level.isClientSide) {
+            return;
+        }
+        pendingRuntimeStateApply = false;
+        SharedMediaManager.applyRuntimeStateToBlockEntity(this);
     }
 
     public void handleUpdateTag(CompoundTag tag) {

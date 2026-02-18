@@ -12,7 +12,8 @@ public record ServerboundRadioControlMessage(
         String artist,
         String thumbnail,
         float volume,
-        long positionMs
+        long positionMs,
+        long trackDurationMs
 ) {
     private static final int MAX_PACKET_STRING = 32767;
     private static final int MAX_TITLE_ARTIST = 4096;
@@ -27,6 +28,7 @@ public record ServerboundRadioControlMessage(
                 friendlyByteBuf.readUtf(MAX_TITLE_ARTIST),
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readFloat(),
+                friendlyByteBuf.readLong(),
                 friendlyByteBuf.readLong()
         );
     }
@@ -41,7 +43,21 @@ public record ServerboundRadioControlMessage(
             float volume,
             long positionMs
     ) {
-        this(blockPos, "", action, url, title, artist, thumbnail, volume, positionMs);
+        this(blockPos, "", action, url, title, artist, thumbnail, volume, positionMs, -1L);
+    }
+
+    public ServerboundRadioControlMessage(
+            BlockPos blockPos,
+            String radioId,
+            Action action,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            float volume,
+            long positionMs
+    ) {
+        this(blockPos, radioId, action, url, title, artist, thumbnail, volume, positionMs, -1L);
     }
 
     public void encode(FriendlyByteBuf friendlyByteBuf) {
@@ -58,6 +74,7 @@ public record ServerboundRadioControlMessage(
         friendlyByteBuf.writeUtf(thumbnail, MAX_PACKET_STRING);
         friendlyByteBuf.writeFloat(volume);
         friendlyByteBuf.writeLong(positionMs);
+        friendlyByteBuf.writeLong(trackDurationMs);
     }
 
     public enum Action {
@@ -67,6 +84,7 @@ public record ServerboundRadioControlMessage(
         TOGGLE_PAUSE,
         STOP,
         SET_VOLUME,
-        SEEK
+        SEEK,
+        SYNC_RUNTIME
     }
 }

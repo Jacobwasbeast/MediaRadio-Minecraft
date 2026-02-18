@@ -19,6 +19,8 @@ import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityTicker;
+import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
@@ -32,7 +34,9 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.client.MediaRadioClient;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
+import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.EnumMap;
 import java.util.Map;
@@ -94,6 +98,15 @@ public class RadioBlock extends BaseEntityBlock implements EntityBlock {
     @Override
     public BlockEntity newBlockEntity(BlockPos blockPos, BlockState blockState) {
         return new RadioBlockEntity(blockPos, blockState);
+    }
+
+    @Nullable
+    @Override
+    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state, BlockEntityType<T> blockEntityType) {
+        if (level.isClientSide) {
+            return null;
+        }
+        return createTickerHelper(blockEntityType, ModBlockEntities.RADIO_BLOCK_ENTITY.get(), RadioBlockEntity::serverTick);
     }
 
     @Override

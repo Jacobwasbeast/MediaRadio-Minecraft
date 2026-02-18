@@ -42,10 +42,13 @@ public class ClientAudioEngine {
     private static final long REMOTE_FORCE_SYNC_MIN_DRIFT_MS = 250L;
     private static final long REMOTE_SEEK_EVENT_MIN_DRIFT_MS = 1_250L;
     private static final long REMOTE_SEEK_COOLDOWN_MS = 10_000L;
+    private static final long BLOCK_RUNTIME_SYNC_INTERVAL_MS = 2_000L;
 
     private final Map<BlockPos, RadioAudioChannel> blockChannels = new ConcurrentHashMap<>();
     private final Map<BlockPos, Integer> blockSeekVersions = new ConcurrentHashMap<>();
     private final Map<BlockPos, Integer> blockEndSuppressTicks = new ConcurrentHashMap<>();
+    private final Map<BlockPos, String> blockRuntimeSyncKeys = new ConcurrentHashMap<>();
+    private final Map<BlockPos, Long> blockRuntimeSyncAtMs = new ConcurrentHashMap<>();
 
     // Independent handheld playback sessions keyed by radio id.
     private final Map<String, HandheldSession> handheldSessions = new ConcurrentHashMap<>();
@@ -594,6 +597,8 @@ public class ClientAudioEngine {
         blockChannels.clear();
         blockSeekVersions.clear();
         blockEndSuppressTicks.clear();
+        blockRuntimeSyncKeys.clear();
+        blockRuntimeSyncAtMs.clear();
     }
 
     public long getBlockPlaybackPositionMs(BlockPos blockPos) {
@@ -1245,6 +1250,7 @@ public class ClientAudioEngine {
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
         String queueStateJson = repository.exportQueueStateJsonForRadioId(session.radioId);
         long position = session.channel == null ? Math.max(0L, session.pausedPositionMs) : session.channel.getEstimatedPositionMs();
+        long trackDurationMs = session.channel == null ? -1L : session.channel.getTrackDurationMs();
         SharedMediaSnapshot.MediaEntry current = repository.getCurrentQueueEntryForRadioId(session.radioId);
         String resolvedUrl = current != null && current.url != null && !current.url.isBlank() ? current.url : session.url;
         String resolvedTitle = current != null && current.title != null && !current.title.isBlank() ? current.title : session.title;
@@ -1271,6 +1277,7 @@ public class ClientAudioEngine {
                 resolvedThumbnail,
                 queueStateJson,
                 position,
+                trackDurationMs,
                 session.volume,
                 true
         );
@@ -1285,6 +1292,7 @@ public class ClientAudioEngine {
             String thumbnail,
             String queueStateJson,
             long position,
+            long trackDurationMs,
             float volume,
             boolean allowInventoryBroadcast
     ) {
@@ -1292,10 +1300,12 @@ public class ClientAudioEngine {
             return;
         }
         long positionBucket = Math.max(0L, position) / 500L;
+        long durationBucket = trackDurationMs <= 0L ? -1L : (trackDurationMs / 1_000L);
         float clampedVolume = Mth.clamp(volume, 0f, 2f);
         boolean shouldPlay = session.intendedPlaying && !safe(url).isBlank();
         String stateKey = radioId + "|" + safe(url) + "|" + safe(title) + "|" + safe(artist) + "|" + safe(thumbnail) + "|"
-                + queueStateJson.hashCode() + "|" + positionBucket + "|" + clampedVolume + "|" + shouldPlay + "|"
+                + queueStateJson.hashCode() + "|" + positionBucket + "|" + durationBucket + "|"
+                + clampedVolume + "|" + shouldPlay + "|"
                 + allowInventoryBroadcast + "|" + session.seekSerial;
         if (stateKey.equals(session.lastSyncedRuntimeKey)) {
             return;
@@ -1310,6 +1320,7 @@ public class ClientAudioEngine {
                 queueStateJson == null ? "" : queueStateJson,
                 clampedVolume,
                 Math.max(0L, position),
+                trackDurationMs,
                 Math.max(0, session.seekSerial),
                 shouldPlay,
                 allowInventoryBroadcast
@@ -1515,6 +1526,8 @@ public class ClientAudioEngine {
                             existing.stop();
                         }
                         blockSeekVersions.remove(blockPos);
+                        blockRuntimeSyncKeys.remove(blockPos);
+                        blockRuntimeSyncAtMs.remove(blockPos);
                         continue;
                     }
 
@@ -1554,21 +1567,25 @@ public class ClientAudioEngine {
                 channel.stop();
             }
             blockSeekVersions.remove(stalePos);
+            blockRuntimeSyncKeys.remove(stalePos);
+            blockRuntimeSyncAtMs.remove(stalePos);
         }
     }
 
     private void tickBlockChannels(Minecraft minecraft) {
         Set<BlockPos> endedNaturally = new HashSet<>();
         for (Map.Entry<BlockPos, RadioAudioChannel> entry : blockChannels.entrySet()) {
+            BlockPos blockPos = entry.getKey();
             RadioAudioChannel channel = entry.getValue();
             channel.tick();
+            syncBlockRuntimeStateToServer(minecraft, blockPos, channel);
             boolean ended = channel.consumeNaturalEnd();
             if (!ended && hasExceededTrackDuration(channel)) {
                 channel.stop();
                 ended = true;
             }
             if (ended) {
-                endedNaturally.add(entry.getKey());
+                endedNaturally.add(blockPos);
             }
         }
 
@@ -1683,6 +1700,58 @@ public class ClientAudioEngine {
         }
         long position = channel.getEstimatedPositionMs();
         return position + 250L >= duration;
+    }
+
+    private void syncBlockRuntimeStateToServer(Minecraft minecraft, BlockPos blockPos, RadioAudioChannel channel) {
+        if (minecraft.level == null || minecraft.player == null || blockPos == null || channel == null) {
+            return;
+        }
+        if (!(minecraft.level.getBlockEntity(blockPos) instanceof RadioBlockEntity radioBlockEntity)) {
+            blockRuntimeSyncKeys.remove(blockPos);
+            blockRuntimeSyncAtMs.remove(blockPos);
+            return;
+        }
+        if (!radioBlockEntity.isPlaying() || radioBlockEntity.getMediaUrl().isBlank()) {
+            blockRuntimeSyncKeys.remove(blockPos);
+            blockRuntimeSyncAtMs.remove(blockPos);
+            return;
+        }
+
+        long durationMs = channel.getTrackDurationMs();
+        if (durationMs <= 0L || durationMs == Long.MAX_VALUE) {
+            return;
+        }
+        long positionMs = Math.max(0L, channel.getEstimatedPositionMs());
+        String radioId = safe(radioBlockEntity.getRadioId());
+        if (radioId.isBlank()) {
+            return;
+        }
+
+        long nowMs = System.currentTimeMillis();
+        long positionBucket = positionMs / 500L;
+        long durationBucket = durationMs / 1_000L;
+        String syncKey = radioId + "|" + safe(radioBlockEntity.getMediaUrl()) + "|" + positionBucket + "|" + durationBucket;
+        String lastKey = blockRuntimeSyncKeys.get(blockPos);
+        Long lastSentAtMs = blockRuntimeSyncAtMs.get(blockPos);
+        boolean isDue = lastSentAtMs == null || nowMs - lastSentAtMs >= BLOCK_RUNTIME_SYNC_INTERVAL_MS;
+        if (!isDue && syncKey.equals(lastKey)) {
+            return;
+        }
+
+        ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                blockPos,
+                radioId,
+                ServerboundRadioControlMessage.Action.SYNC_RUNTIME,
+                safe(radioBlockEntity.getMediaUrl()),
+                safe(radioBlockEntity.getMediaTitle()),
+                safe(radioBlockEntity.getMediaArtist()),
+                safe(radioBlockEntity.getMediaThumbnail()),
+                radioBlockEntity.getVolume(),
+                positionMs,
+                durationMs
+        ));
+        blockRuntimeSyncKeys.put(blockPos, syncKey);
+        blockRuntimeSyncAtMs.put(blockPos, nowMs);
     }
 
     private void alignQueueIndexToCurrentUrl(ClientMediaRepository repository, String currentUrl) {
