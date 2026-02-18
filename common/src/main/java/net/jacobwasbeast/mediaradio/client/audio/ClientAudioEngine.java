@@ -34,6 +34,7 @@ public class ClientAudioEngine {
     private static final float HANDHELD_EXTERNAL_MAX_DISTANCE = 24f;
     private static final double HANDHELD_EXTERNAL_MAX_DISTANCE_SQR = HANDHELD_EXTERNAL_MAX_DISTANCE * HANDHELD_EXTERNAL_MAX_DISTANCE;
     private static final float CONTRAPTION_EXTERNAL_MAX_DISTANCE = 30f;
+    private static final double CONTRAPTION_EXTERNAL_MAX_DISTANCE_SQR = CONTRAPTION_EXTERNAL_MAX_DISTANCE * CONTRAPTION_EXTERNAL_MAX_DISTANCE;
     private static final long EXTERNAL_CONTEXT_TTL_CONTRAPTION_TICKS = 40L;
     private static final long EXTERNAL_CONTEXT_TTL_HANDHELD_TICKS = 200L;
     private static final long REMOTE_PLAYING_DRIFT_CORRECTION_MS = 12_000L;
@@ -919,9 +920,6 @@ public class ClientAudioEngine {
         if (context == null) {
             return baseVolume;
         }
-        if (context.localPos != null) {
-            return Mth.clamp(baseVolume * settings.blockRadioVolume(), 0f, 2f);
-        }
         if (context.inventoryPlayback && !settings.hearInventoryPlayerRadios()) {
             return 0f;
         }
@@ -936,8 +934,12 @@ public class ClientAudioEngine {
             sourcePos = sourceEntity.position();
             context.lastKnownPos = sourcePos;
         }
-        if (sourcePos == null || minecraft.player.position().distanceToSqr(sourcePos) > HANDHELD_EXTERNAL_MAX_DISTANCE_SQR) {
+        double maxDistanceSqr = context.localPos == null ? HANDHELD_EXTERNAL_MAX_DISTANCE_SQR : CONTRAPTION_EXTERNAL_MAX_DISTANCE_SQR;
+        if (sourcePos == null || minecraft.player.position().distanceToSqr(sourcePos) > maxDistanceSqr) {
             return 0f;
+        }
+        if (context.localPos != null) {
+            return Mth.clamp(baseVolume * settings.blockRadioVolume(), 0f, 2f);
         }
         return Mth.clamp(baseVolume * settings.otherPlayersHandheldVolume(), 0f, 2f);
     }
