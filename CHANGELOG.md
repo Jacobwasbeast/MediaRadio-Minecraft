@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+
+- Reworked playback/session synchronization across handheld, block, and contraption contexts.
+- Improved queue and runtime authority handling to reduce desync, stale state overwrite, and unexpected pauses.
+- Fixed multiplayer radio control flow so other players can modify placed radio playback/queue/options.
+- Improved block UI/session display consistency for same-id simultaneous radios.
+- Added additional fixes to cross-client playback stability and radio interaction behavior.
+
 ## 1.2.0
 
 - Fixed Create contraption playback distance limits so audio is no longer global.
