@@ -52,6 +52,8 @@ public class RadioAudioChannel {
     private static final long STALL_RECOVERY_STARTUP_GRACE_MS = 4_000L;
     private static final long STALL_RECOVERY_THRESHOLD_MS = 6_500L;
     private static final long STALL_RECOVERY_COOLDOWN_MS = 10_000L;
+    private static final long SOURCE_CREATE_RETRY_COOLDOWN_MS = 1_000L;
+    private static final long SOURCE_CREATE_LOG_COOLDOWN_MS = 10_000L;
 
     private static final ExecutorService DECODE_EXECUTOR = Executors.newCachedThreadPool(new ThreadFactory() {
         private int counter;
@@ -90,6 +92,8 @@ public class RadioAudioChannel {
     private volatile long lastPlaybackProgressAtMs;
     private volatile long stallDetectedAtMs;
     private volatile long lastRecoveryAttemptAtMs;
+    private volatile long nextSourceCreateRetryAtMs;
+    private volatile long lastSourceCreateErrorLogAtMs;
 
     private volatile CompletableFuture<?> decodeTask;
 
@@ -156,6 +160,8 @@ public class RadioAudioChannel {
         playbackStartedAtMs = System.currentTimeMillis();
         lastPlaybackProgressAtMs = playbackStartedAtMs;
         stallDetectedAtMs = 0L;
+        nextSourceCreateRetryAtMs = 0L;
+        lastSourceCreateErrorLogAtMs = 0L;
         pcmQueue.clear();
         queuedBuffers.clear();
         long generation = decodeGeneration.incrementAndGet();
@@ -247,6 +253,8 @@ public class RadioAudioChannel {
         lastPlaybackProgressAtMs = 0L;
         stallDetectedAtMs = 0L;
         lastRecoveryAttemptAtMs = 0L;
+        nextSourceCreateRetryAtMs = 0L;
+        lastSourceCreateErrorLogAtMs = 0L;
         endedNaturally = naturalEnd;
     }
 
@@ -256,7 +264,24 @@ public class RadioAudioChannel {
         }
 
         if (sourceId == -1 && !currentUrl.isBlank()) {
-            sourceId = alGenSources();
+            long nowMs = System.currentTimeMillis();
+            if (nowMs < nextSourceCreateRetryAtMs) {
+                return;
+            }
+            try {
+                sourceId = alGenSources();
+            } catch (RuntimeException exception) {
+                sourceId = -1;
+                nextSourceCreateRetryAtMs = nowMs + SOURCE_CREATE_RETRY_COOLDOWN_MS;
+                maybeLogSourceCreateFailure(exception);
+                return;
+            }
+            if (sourceId <= 0) {
+                sourceId = -1;
+                nextSourceCreateRetryAtMs = nowMs + SOURCE_CREATE_RETRY_COOLDOWN_MS;
+                maybeLogSourceCreateFailure(null);
+                return;
+            }
             applySourceSettings();
         }
 
@@ -582,5 +607,18 @@ public class RadioAudioChannel {
             alSourcei(sourceId, AL_SOURCE_RELATIVE, AL_TRUE);
             alSource3f(sourceId, AL_POSITION, 0f, 0f, 0f);
         }
+    }
+
+    private void maybeLogSourceCreateFailure(Throwable throwable) {
+        long now = System.currentTimeMillis();
+        if (now - lastSourceCreateErrorLogAtMs < SOURCE_CREATE_LOG_COOLDOWN_MS) {
+            return;
+        }
+        lastSourceCreateErrorLogAtMs = now;
+        if (throwable == null) {
+            MediaRadio.LOGGER.warn("OpenAL source allocation failed for radio channel. Retrying.");
+            return;
+        }
+        MediaRadio.LOGGER.warn("OpenAL source allocation failed for radio channel. Retrying.", throwable);
     }
 }

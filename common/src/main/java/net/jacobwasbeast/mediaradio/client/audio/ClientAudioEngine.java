@@ -440,7 +440,7 @@ public class ClientAudioEngine {
         registerExternalContext(safeRadioId, contraptionEntityId, localPos, inventoryPlayback, localPos != null);
         HandheldSession session = handheldSessions.computeIfAbsent(safeRadioId, HandheldSession::new);
         if (session != null) {
-            reconfigureSessionChannelMode(session, true);
+            reconfigureSessionChannelMode(session, shouldUsePositionalChannel(Minecraft.getInstance(), session));
         }
     }
 
@@ -590,7 +590,7 @@ public class ClientAudioEngine {
         session.intendedPlaying = playing;
 
         if (session.channel != null) {
-            reconfigureSessionChannelMode(session, externalContexts.get(session.radioId) != null);
+            reconfigureSessionChannelMode(session, shouldUsePositionalChannel(Minecraft.getInstance(), session));
             if (!session.title.isBlank()) {
                 session.channel.setDisplayTitle(session.title);
             }
@@ -735,10 +735,13 @@ public class ClientAudioEngine {
         if (!blockScreenOpen && !session.radioId.equals(repository.getActiveRadioId())) {
             repository.setActiveRadioId(session.radioId);
         }
+        boolean activeHandheldScreenOpen = minecraft.screen instanceof RadioScreen radioScreen
+                && !radioScreen.isBlockModeScreen()
+                && session.radioId.equals(repository.getActiveRadioId());
 
         // While the radio is in block placement mode, keep playback paused locally.
         // We still preserve intendedPlaying so placing the radio can resume playback.
-        if (isRadioHeldInPlaceMode(minecraft, session.radioId)) {
+        if (isRadioHeldInPlaceMode(minecraft, session.radioId) && !activeHandheldScreenOpen) {
             if (session.channel != null && session.channel.isPlaying()) {
                 session.pausedPositionMs = session.channel.getEstimatedPositionMs();
                 session.pausedState = true;
@@ -960,7 +963,7 @@ public class ClientAudioEngine {
     }
 
     private void playSession(HandheldSession session, String url, long positionMs, String displayTitle, String artist, String thumbnail) {
-        boolean shouldBePositional = externalContexts.get(session.radioId) != null;
+        boolean shouldBePositional = shouldUsePositionalChannel(Minecraft.getInstance(), session);
         if (session.channel == null || session.channel.isPositional() != shouldBePositional) {
             if (session.channel != null) {
                 session.channel.stop();
@@ -993,8 +996,7 @@ public class ClientAudioEngine {
             return;
         }
 
-        ExternalRadioContext externalContext = externalContexts.get(session.radioId);
-        boolean shouldBePositional = externalContext != null;
+        boolean shouldBePositional = shouldUsePositionalChannel(minecraft, session);
         if (session.channel == null) {
             session.channel = createSessionChannel(session, shouldBePositional);
             session.channel.setDisplayTitle(session.title);
@@ -1312,7 +1314,7 @@ public class ClientAudioEngine {
         session.pausedState = !playing && (!session.url.isBlank() || !session.title.isBlank());
         session.intendedPlaying = playing;
 
-        boolean shouldBePositional = externalContexts.get(session.radioId) != null;
+        boolean shouldBePositional = shouldUsePositionalChannel(Minecraft.getInstance(), session);
         if (session.channel == null && shouldBePositional && playing && !session.url.isBlank()) {
             session.channel = createSessionChannel(session, true);
             session.channel.setDisplayTitle(session.title);
@@ -1375,6 +1377,20 @@ public class ClientAudioEngine {
             return false;
         }
         // If this client owns the radio item, avoid forcing seeks from echoed server snapshots.
+        return findRadioStackById(minecraft, session.radioId).isEmpty();
+    }
+
+    private boolean shouldUsePositionalChannel(Minecraft minecraft, HandheldSession session) {
+        if (session == null || session.radioId == null || session.radioId.isBlank()) {
+            return false;
+        }
+        if (!isExternalSession(session.radioId)) {
+            return false;
+        }
+        if (minecraft == null || minecraft.player == null) {
+            return true;
+        }
+        // Local radios should remain listener-relative even if another endpoint shares the same session id.
         return findRadioStackById(minecraft, session.radioId).isEmpty();
     }
 

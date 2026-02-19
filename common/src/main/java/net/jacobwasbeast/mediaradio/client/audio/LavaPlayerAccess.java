@@ -22,34 +22,37 @@ import javax.sound.sampled.AudioInputStream;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class LavaPlayerAccess {
 
     public static final int SAMPLE_RATE = 48000;
     public static final int BYTES_PER_SECOND = SAMPLE_RATE * 2 * 2;
+    private static final long TRACK_LOAD_TIMEOUT_SECONDS = 20L;
+    private static final long PLAYLIST_LOAD_TIMEOUT_SECONDS = 25L;
+    private static final int TIMEOUT_FAILURES_BEFORE_RESET = 3;
+    private static final long MANAGER_RESET_COOLDOWN_MS = 20_000L;
     private static final Pattern YOUTUBE_WATCH_PATTERN = Pattern.compile("(?:youtu\\.be/|youtube\\.com/(?:watch\\?v=|shorts/|live/))([A-Za-z0-9_-]{11})");
     private static final Pattern YOUTUBE_V_PARAM_PATTERN = Pattern.compile("[?&]v=([A-Za-z0-9_-]{11})");
 
     private static final LavaPlayerAccess INSTANCE = new LavaPlayerAccess();
 
     private final AudioDataFormat audioDataFormat = new Pcm16AudioDataFormat(2, SAMPLE_RATE, 960, false);
-    private final AudioPlayerManager audioPlayerManager;
+    private final Object managerResetLock = new Object();
+    private final AtomicInteger consecutiveTimeoutFailures = new AtomicInteger();
+    private volatile AudioPlayerManager audioPlayerManager;
+    private volatile long lastManagerResetAtMs;
 
     private LavaPlayerAccess() {
-        audioPlayerManager = new DefaultAudioPlayerManager();
-        audioPlayerManager.setFrameBufferDuration(1000);
-        audioPlayerManager.setPlayerCleanupThreshold(Long.MAX_VALUE);
-        audioPlayerManager.getConfiguration().setResamplingQuality(AudioConfiguration.ResamplingQuality.HIGH);
-        audioPlayerManager.getConfiguration().setOutputFormat(audioDataFormat);
-        AudioSourceManagers.registerLocalSource(audioPlayerManager);
-        tryRegisterYoutubeSource();
-        registerNonYoutubeRemoteSources();
-        logRegisteredSourceManagers();
+        audioPlayerManager = createConfiguredManager();
     }
 
     public static LavaPlayerAccess get() {
@@ -59,34 +62,44 @@ public class LavaPlayerAccess {
     public CompletableFuture<AudioTrack> loadTrack(String identifier) {
         String normalizedIdentifier = normalizeIdentifier(identifier);
         CompletableFuture<AudioTrack> future = new CompletableFuture<>();
-        audioPlayerManager.loadItemOrdered(this, normalizedIdentifier, new AudioLoadResultHandler() {
+        Future<Void> loadFuture = audioPlayerManager.loadItem(normalizedIdentifier, new AudioLoadResultHandler() {
             @Override
             public void trackLoaded(AudioTrack track) {
-                future.complete(track);
+                if (future.complete(track)) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
             public void playlistLoaded(AudioPlaylist playlist) {
+                AudioTrack loadedTrack;
                 if (playlist.getSelectedTrack() != null) {
-                    future.complete(playlist.getSelectedTrack());
+                    loadedTrack = playlist.getSelectedTrack();
                 } else if (!playlist.getTracks().isEmpty()) {
-                    future.complete(playlist.getTracks().get(0));
+                    loadedTrack = playlist.getTracks().get(0);
                 } else {
-                    future.complete(null);
+                    loadedTrack = null;
+                }
+                if (future.complete(loadedTrack)) {
+                    recordLoadSuccess();
                 }
             }
 
             @Override
             public void noMatches() {
-                future.complete(null);
+                if (future.complete(null)) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
             public void loadFailed(FriendlyException exception) {
-                future.completeExceptionally(exception);
+                if (future.completeExceptionally(exception)) {
+                    recordLoadFailure(normalizedIdentifier, exception);
+                }
             }
         });
-        return future.orTimeout(20, TimeUnit.SECONDS);
+        return withTimeoutGuard(normalizedIdentifier, future, loadFuture, TRACK_LOAD_TIMEOUT_SECONDS);
     }
 
     public CompletableFuture<List<SearchResult>> searchYoutube(String query, int maxResults) {
@@ -97,10 +110,13 @@ public class LavaPlayerAccess {
 
         int limit = Math.max(1, maxResults);
         CompletableFuture<List<SearchResult>> future = new CompletableFuture<>();
-        audioPlayerManager.loadItemOrdered(this, "ytsearch:" + safeQuery, new AudioLoadResultHandler() {
+        String identifier = "ytsearch:" + safeQuery;
+        Future<Void> loadFuture = audioPlayerManager.loadItem(identifier, new AudioLoadResultHandler() {
             @Override
             public void trackLoaded(AudioTrack track) {
-                future.complete(List.of(toSearchResult(track)));
+                if (future.complete(List.of(toSearchResult(track)))) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
@@ -115,20 +131,26 @@ public class LavaPlayerAccess {
                         break;
                     }
                 }
-                future.complete(results);
+                if (future.complete(results)) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
             public void noMatches() {
-                future.complete(List.of());
+                if (future.complete(List.of())) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
             public void loadFailed(FriendlyException exception) {
-                future.completeExceptionally(exception);
+                if (future.completeExceptionally(exception)) {
+                    recordLoadFailure(identifier, exception);
+                }
             }
         });
-        return future.orTimeout(20, TimeUnit.SECONDS);
+        return withTimeoutGuard(identifier, future, loadFuture, TRACK_LOAD_TIMEOUT_SECONDS);
     }
 
     public CompletableFuture<List<SearchResult>> loadPlaylistTracks(String identifier, int maxTracks) {
@@ -139,10 +161,12 @@ public class LavaPlayerAccess {
 
         int limit = Math.max(1, maxTracks);
         CompletableFuture<List<SearchResult>> future = new CompletableFuture<>();
-        audioPlayerManager.loadItemOrdered(this, normalizedIdentifier, new AudioLoadResultHandler() {
+        Future<Void> loadFuture = audioPlayerManager.loadItem(normalizedIdentifier, new AudioLoadResultHandler() {
             @Override
             public void trackLoaded(AudioTrack track) {
-                future.complete(List.of(toSearchResult(track)));
+                if (future.complete(List.of(toSearchResult(track)))) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
@@ -157,20 +181,26 @@ public class LavaPlayerAccess {
                         break;
                     }
                 }
-                future.complete(results);
+                if (future.complete(results)) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
             public void noMatches() {
-                future.complete(List.of());
+                if (future.complete(List.of())) {
+                    recordLoadSuccess();
+                }
             }
 
             @Override
             public void loadFailed(FriendlyException exception) {
-                future.completeExceptionally(exception);
+                if (future.completeExceptionally(exception)) {
+                    recordLoadFailure(normalizedIdentifier, exception);
+                }
             }
         });
-        return future.orTimeout(25, TimeUnit.SECONDS);
+        return withTimeoutGuard(normalizedIdentifier, future, loadFuture, PLAYLIST_LOAD_TIMEOUT_SECONDS);
     }
 
     public OpenedTrack openTrack(AudioTrack sourceTrack, long positionMs) {
@@ -192,24 +222,115 @@ public class LavaPlayerAccess {
         return new OpenedTrack(audioPlayer, stream, track, track.getInfo(), durationMs);
     }
 
-    private void tryRegisterYoutubeSource() {
+    private AudioPlayerManager createConfiguredManager() {
+        AudioPlayerManager manager = new DefaultAudioPlayerManager();
+        manager.setFrameBufferDuration(1000);
+        manager.setPlayerCleanupThreshold(Long.MAX_VALUE);
+        manager.getConfiguration().setResamplingQuality(AudioConfiguration.ResamplingQuality.HIGH);
+        manager.getConfiguration().setOutputFormat(audioDataFormat);
+        AudioSourceManagers.registerLocalSource(manager);
+        tryRegisterYoutubeSource(manager);
+        registerNonYoutubeRemoteSources(manager);
+        logRegisteredSourceManagers(manager);
+        return manager;
+    }
+
+    private <T> CompletableFuture<T> withTimeoutGuard(String identifier, CompletableFuture<T> resultFuture, Future<Void> loadFuture, long timeoutSeconds) {
+        return resultFuture
+                .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .whenComplete((ignored, throwable) -> {
+                    if (throwable == null) {
+                        return;
+                    }
+                    if (loadFuture != null && !loadFuture.isDone()) {
+                        loadFuture.cancel(true);
+                    }
+                    Throwable cause = unwrapCompletionThrowable(throwable);
+                    if (cause instanceof FriendlyException) {
+                        return;
+                    }
+                    recordLoadFailure(identifier, cause);
+                });
+    }
+
+    private Throwable unwrapCompletionThrowable(Throwable throwable) {
+        Throwable current = throwable;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current == null ? throwable : current;
+    }
+
+    private void recordLoadSuccess() {
+        consecutiveTimeoutFailures.set(0);
+    }
+
+    private void recordLoadFailure(String identifier, Throwable throwable) {
+        Throwable cause = unwrapCompletionThrowable(throwable);
+        boolean timeout = cause instanceof TimeoutException;
+        boolean loadQueueRejected = cause instanceof FriendlyException friendlyException
+                && friendlyException.getMessage() != null
+                && friendlyException.getMessage().contains("queue is full");
+        if (!timeout && !loadQueueRejected) {
+            return;
+        }
+
+        int failures = consecutiveTimeoutFailures.incrementAndGet();
+        if (timeout) {
+            MediaRadio.LOGGER.warn("Timed out loading media identifier {} (consecutive timeouts: {})", identifier, failures);
+        }
+        if (failures < TIMEOUT_FAILURES_BEFORE_RESET) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now - lastManagerResetAtMs < MANAGER_RESET_COOLDOWN_MS) {
+            return;
+        }
+
+        synchronized (managerResetLock) {
+            int currentFailures = consecutiveTimeoutFailures.get();
+            long nowLocked = System.currentTimeMillis();
+            if (currentFailures < TIMEOUT_FAILURES_BEFORE_RESET || nowLocked - lastManagerResetAtMs < MANAGER_RESET_COOLDOWN_MS) {
+                return;
+            }
+
+            AudioPlayerManager previous = audioPlayerManager;
+            AudioPlayerManager replacement = createConfiguredManager();
+            audioPlayerManager = replacement;
+            lastManagerResetAtMs = nowLocked;
+            consecutiveTimeoutFailures.set(0);
+            MediaRadio.LOGGER.warn(
+                    "Reset client audio load manager after repeated load failures (last identifier: {})",
+                    identifier,
+                    cause
+            );
+            try {
+                previous.shutdown();
+            } catch (Exception shutdownError) {
+                MediaRadio.LOGGER.warn("Failed to shutdown previous audio load manager after reset", shutdownError);
+            }
+        }
+    }
+
+    private void tryRegisterYoutubeSource(AudioPlayerManager manager) {
         try {
             // Exact same construction style as IamMusicPlayer_FIX-1.20.1.
             YoutubeAudioSourceManager sourceManager = new YoutubeAudioSourceManager();
-            audioPlayerManager.registerSourceManager((AudioSourceManager) sourceManager);
+            manager.registerSourceManager((AudioSourceManager) sourceManager);
         } catch (Exception exception) {
             MediaRadio.LOGGER.warn("YouTube source manager not available, YouTube playback may fail", exception);
         }
     }
 
-    private void registerNonYoutubeRemoteSources() {
+    private void registerNonYoutubeRemoteSources(AudioPlayerManager manager) {
         // Do NOT use AudioSourceManagers.registerRemoteSources(...) with Lavaplayer 2.2.6.
         // It auto-registers the legacy Lavaplayer YouTube source and causes cipher failures.
-        audioPlayerManager.registerSourceManager(new HttpAudioSourceManager());
+        manager.registerSourceManager(new HttpAudioSourceManager());
     }
 
-    private void logRegisteredSourceManagers() {
-        String sourceList = audioPlayerManager.getSourceManagers().stream()
+    private void logRegisteredSourceManagers(AudioPlayerManager manager) {
+        String sourceList = manager.getSourceManagers().stream()
                 .map(source -> source.getClass().getName())
                 .collect(Collectors.joining(", "));
         MediaRadio.LOGGER.info("Registered audio sources: {}", sourceList);
