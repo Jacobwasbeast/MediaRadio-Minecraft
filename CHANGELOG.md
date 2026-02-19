@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+- Fixed client audio session recovery so playback does not require a client restart after stalled/new-session failures.
+- Fixed handheld playback producing no audio when sharing a radio id with a placed block radio.
+- Improved client-side channel/backend recovery behavior for lavaplayer/openal failure cases.
+
 ## 1.3.0
 
 - Reworked playback/session synchronization across handheld, block, and contraption contexts.
