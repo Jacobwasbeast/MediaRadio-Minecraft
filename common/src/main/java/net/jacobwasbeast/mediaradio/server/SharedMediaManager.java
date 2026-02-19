@@ -622,7 +622,7 @@ public class SharedMediaManager {
                 runtimeOwnerId = blockOwnerId;
                 changed = true;
             }
-        } else if (!runtimeOwnerId.equals(blockOwnerId)) {
+        } else if (blockOwnerId.isBlank()) {
             radioBlockEntity.setOwnerId(runtimeOwnerId);
         }
         if (state.playing && !safe(state.url).isBlank()) {
@@ -894,7 +894,15 @@ public class SharedMediaManager {
                 if (!resolvedOwner.equals(blockOwnerId)) {
                     radioBlockEntity.setOwnerId(resolvedOwner);
                 }
-            } else if (!runtimeOwnerId.equals(blockOwnerId)) {
+            } else if (!blockOwnerId.isBlank() && !runtimeOwnerId.equals(blockOwnerId)) {
+                // Keep runtime owner metadata aligned to the actual block owner tag,
+                // but do not gate block controls by ownership.
+                state.ownerId = blockOwnerId;
+                if (runtimeData != null) {
+                    runtimeData.setDirty();
+                }
+                runtimeOwnerId = blockOwnerId;
+            } else if (blockOwnerId.isBlank()) {
                 radioBlockEntity.setOwnerId(runtimeOwnerId);
             }
         }
@@ -904,9 +912,9 @@ public class SharedMediaManager {
             if (runtimeData != null) {
                 runtimeData.setDirty();
             }
-            return true;
         }
-        return runtimeOwnerId.equals(playerId);
+        // Placed block radios are collaborative controls: any nearby player may operate transport/queue/options.
+        return true;
     }
 
     private static boolean authorizeHandheldRuntimeControl(
