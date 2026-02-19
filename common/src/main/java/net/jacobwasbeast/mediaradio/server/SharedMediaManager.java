@@ -9,6 +9,7 @@ import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
+import net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
@@ -31,7 +32,8 @@ import java.net.URISyntaxException;
 
 public class SharedMediaManager {
     private static final long CHUNK_TTL_MS = 30_000L;
-    private static final int MAX_QUEUE_STATE_RADIO_PACKET = 8_192;
+    private static final long COMMAND_DEDUPE_WINDOW_MS = 30_000L;
+    private static final int MAX_QUEUE_STATE_RADIO_PACKET = 30_000;
     private static final int HANDHELD_PERIODIC_SYNC_INTERVAL_TICKS = 40;
     private static final int UNOWNED_RUNTIME_SIMULATION_INTERVAL_TICKS = 20;
     private static final long UNOWNED_RUNTIME_STALE_MS = 3_000L;
@@ -39,9 +41,12 @@ public class SharedMediaManager {
     private static final int MAX_SIMULATED_TRANSITIONS_PER_TICK = 128;
     private static final double HANDHELD_LISTENER_SYNC_RANGE_SQR = 96.0D * 96.0D;
     private static final double BLOCK_CONTROL_MAX_DISTANCE_SQR = 24.0D * 24.0D;
+    private static final String RUNTIME_SCOPE_HANDHELD = "handheld";
+    private static final String RUNTIME_SCOPE_BLOCK = "block";
     private static final Gson GSON = new Gson();
     private static final Map<String, ChunkAccumulator> CHUNK_UPLOADS = new HashMap<>();
     private static final Map<String, HandheldListenerContext> ACTIVE_HANDHELD_LISTENER_CONTEXTS = new HashMap<>();
+    private static final Map<String, Long> RECENT_SESSION_COMMANDS = new HashMap<>();
 
     public static void initialize() {
         Balm.getEvents().onEvent(net.blay09.mods.balm.api.event.PlayerLoginEvent.class,
@@ -120,6 +125,9 @@ public class SharedMediaManager {
 
     public static void handleRadioControl(ServerPlayer player, ServerboundRadioControlMessage message) {
         BlockPos blockPos = message.blockPos();
+        ServerboundRadioControlMessage.Context messageContext = message.context() == null
+                ? ServerboundRadioControlMessage.Context.BLOCK
+                : message.context();
         RadioBlockEntity radioBlockEntity = null;
         String radioId = safe(message.radioId());
         if (blockPos != null) {
@@ -135,7 +143,7 @@ public class SharedMediaManager {
                     radioBlockEntity.setRadioId(blockRadioId);
                 }
                 radioId = blockRadioId;
-            } else if (radioId.isBlank()) {
+            } else {
                 return;
             }
         } else if (radioId.isBlank()) {
@@ -143,47 +151,152 @@ public class SharedMediaManager {
         }
 
         RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
-        RadioRuntimeStateSavedData.RadioRuntimeState runtimeState = runtimeData.getOrCreate(radioId);
+        boolean blockScoped = blockPos != null || messageContext == ServerboundRadioControlMessage.Context.BLOCK;
+        ServerboundRequestRadioStateMessage.Context responseContext = blockScoped
+                ? ServerboundRequestRadioStateMessage.Context.BLOCK
+                : ServerboundRequestRadioStateMessage.Context.HANDHELD;
+        String runtimeKey = blockScoped ? blockRuntimeKey(radioId) : handheldRuntimeKey(radioId);
+        RadioRuntimeStateSavedData.RadioRuntimeState runtimeState = resolveOrCreateScopedState(
+                runtimeData,
+                runtimeKey,
+                radioId
+        );
+        ensureSessionIdentity(runtimeState, runtimeKey);
+        if (!authorizeRuntimeControl(player, radioId, runtimeState, runtimeData, blockScoped, radioBlockEntity)) {
+            sendSessionCommandResult(
+                    player,
+                    radioId,
+                    runtimeState,
+                    false,
+                    ClientboundSessionCommandResultMessage.Reason.UNAUTHORIZED,
+                    responseContext
+            );
+            return;
+        }
         long now = System.currentTimeMillis();
+        if (isDuplicateCommand(runtimeState, player.getUUID(), message.commandId(), now)) {
+            sendSessionCommandResult(
+                    player,
+                    radioId,
+                    runtimeState,
+                    false,
+                    ClientboundSessionCommandResultMessage.Reason.DUPLICATE_COMMAND,
+                    responseContext
+            );
+            return;
+        }
+        if (isStaleRevision(message.knownRevision(), runtimeState.revision)) {
+            sendSessionCommandResult(
+                    player,
+                    radioId,
+                    runtimeState,
+                    false,
+                    ClientboundSessionCommandResultMessage.Reason.STALE_REVISION,
+                    responseContext
+            );
+            return;
+        }
 
+        boolean runtimeChanged = false;
         switch (message.action()) {
             case PLAY_URL -> {
-                runtimeState.url = safe(message.url());
-                runtimeState.title = safe(message.title());
-                runtimeState.artist = safe(message.artist());
-                runtimeState.thumbnail = safe(message.thumbnail());
-                runtimeState.positionMs = 0L;
+                String incomingUrl = safe(message.url());
+                if (incomingUrl.isBlank()) {
+                    break;
+                }
+                boolean sameTrack = sameTrack(runtimeState.url, incomingUrl);
+                boolean wasPlaying = runtimeState.playing;
+                long requestedPosition = Math.max(0L, message.positionMs());
+                float requestedVolume = Mth.clamp(message.volume(), 0f, 2f);
+                String requestedTitle = safe(message.title());
+                String requestedArtist = safe(message.artist());
+                String requestedThumbnail = safe(message.thumbnail());
                 long incomingDurationMs = message.trackDurationMs();
-                if (incomingDurationMs > 0L) {
-                    runtimeState.trackDurationMs = incomingDurationMs;
-                    if (!runtimeState.url.isBlank()) {
-                        runtimeState.knownTrackDurationsMs.put(trackSyncKey(runtimeState.url), incomingDurationMs);
-                    }
+                long resolvedDurationMs = incomingDurationMs > 0L
+                        ? incomingDurationMs
+                        : resolveTrackDurationMs(runtimeState, incomingUrl);
+
+                String targetTitle = (!requestedTitle.isBlank() || !sameTrack) ? requestedTitle : safe(runtimeState.title);
+                String targetArtist = (!requestedArtist.isBlank() || !sameTrack) ? requestedArtist : safe(runtimeState.artist);
+                String targetThumbnail = (!requestedThumbnail.isBlank() || !sameTrack) ? requestedThumbnail : safe(runtimeState.thumbnail);
+                boolean metadataChanged = !safe(runtimeState.title).equals(targetTitle)
+                        || !safe(runtimeState.artist).equals(targetArtist)
+                        || !safe(runtimeState.thumbnail).equals(targetThumbnail);
+                boolean volumeChanged = Math.abs(runtimeState.volume - requestedVolume) > 0.0001f;
+                boolean durationChanged = resolvedDurationMs > 0L && runtimeState.trackDurationMs != resolvedDurationMs;
+                boolean seekRequested = requestedPosition > 0L;
+                boolean noOpRepeat = sameTrack && wasPlaying && !metadataChanged && !volumeChanged && !durationChanged && !seekRequested;
+                if (noOpRepeat) {
+                    break;
+                }
+
+                if (sameTrack && wasPlaying && !seekRequested) {
+                    preservePlaybackTimelineAnchor(runtimeData, runtimeState, now);
+                } else if (!sameTrack || seekRequested) {
+                    runtimeState.positionMs = requestedPosition;
+                }
+
+                runtimeState.url = incomingUrl;
+                runtimeState.title = targetTitle;
+                runtimeState.artist = targetArtist;
+                runtimeState.thumbnail = targetThumbnail;
+                if (resolvedDurationMs > 0L) {
+                    runtimeState.trackDurationMs = resolvedDurationMs;
+                    runtimeState.knownTrackDurationsMs.put(trackSyncKey(runtimeState.url), resolvedDurationMs);
                 } else {
                     runtimeState.trackDurationMs = resolveTrackDurationMs(runtimeState, runtimeState.url);
                 }
                 runtimeState.playing = true;
                 runtimeState.updatedAtMs = now;
-                runtimeState.volume = Mth.clamp(message.volume(), 0f, 2f);
+                runtimeState.volume = requestedVolume;
+                runtimeChanged = true;
                 if (radioBlockEntity != null) {
-                    radioBlockEntity.setMedia(message.url(), message.title(), message.artist(), message.thumbnail());
-                    radioBlockEntity.play();
+                    if (sameTrack) {
+                        radioBlockEntity.updateMetadata(runtimeState.title, runtimeState.artist, runtimeState.thumbnail);
+                        if (seekRequested) {
+                            radioBlockEntity.seekTo(requestedPosition);
+                        }
+                        if (!radioBlockEntity.isPlaying()) {
+                            radioBlockEntity.play();
+                        }
+                    } else {
+                        radioBlockEntity.setMedia(runtimeState.url, runtimeState.title, runtimeState.artist, runtimeState.thumbnail);
+                        if (seekRequested) {
+                            radioBlockEntity.seekTo(requestedPosition);
+                        }
+                        radioBlockEntity.play();
+                    }
                 }
             }
             case UPDATE_METADATA -> {
-                runtimeState.title = safe(message.title());
-                runtimeState.artist = safe(message.artist());
-                runtimeState.thumbnail = safe(message.thumbnail());
-                runtimeState.updatedAtMs = now;
-                if (radioBlockEntity != null) {
-                    radioBlockEntity.updateMetadata(message.title(), message.artist(), message.thumbnail());
+                String requestedTitle = safe(message.title());
+                String requestedArtist = safe(message.artist());
+                String requestedThumbnail = safe(message.thumbnail());
+                if (!safe(runtimeState.title).equals(requestedTitle)
+                        || !safe(runtimeState.artist).equals(requestedArtist)
+                        || !safe(runtimeState.thumbnail).equals(requestedThumbnail)) {
+                    preservePlaybackTimelineAnchor(runtimeData, runtimeState, now);
+                    runtimeState.title = requestedTitle;
+                    runtimeState.artist = requestedArtist;
+                    runtimeState.thumbnail = requestedThumbnail;
+                    runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
+                    if (radioBlockEntity != null) {
+                        radioBlockEntity.updateMetadata(runtimeState.title, runtimeState.artist, runtimeState.thumbnail);
+                    }
                 }
             }
             case UPDATE_QUEUE_STATE -> {
-                runtimeState.queueStateJson = safe(message.url());
-                runtimeState.updatedAtMs = now;
-                if (radioBlockEntity != null) {
-                    radioBlockEntity.setQueueStateJson(message.url());
+                String incomingQueueState = safe(message.url());
+                String mergedQueueState = mergeIncomingQueueState(runtimeState.queueStateJson, incomingQueueState);
+                if (!safe(runtimeState.queueStateJson).equals(mergedQueueState)) {
+                    preservePlaybackTimelineAnchor(runtimeData, runtimeState, now);
+                    runtimeState.queueStateJson = mergedQueueState;
+                    runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
+                    if (radioBlockEntity != null) {
+                        radioBlockEntity.setQueueStateJson(mergedQueueState);
+                    }
                 }
             }
             case TOGGLE_PAUSE -> {
@@ -191,63 +304,130 @@ public class SharedMediaManager {
                     runtimeState.positionMs = runtimeData.currentPositionMs(runtimeState);
                     runtimeState.playing = false;
                     runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
                     if (radioBlockEntity != null) {
                         radioBlockEntity.pause();
                     }
                 } else {
+                    if (safe(runtimeState.url).isBlank()) {
+                        break;
+                    }
                     runtimeState.playing = true;
                     runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
                     if (radioBlockEntity != null) {
                         radioBlockEntity.play();
                     }
                 }
             }
             case STOP -> {
-                runtimeState.playing = false;
-                runtimeState.positionMs = 0L;
-                runtimeState.trackDurationMs = -1L;
-                runtimeState.updatedAtMs = now;
-                if (radioBlockEntity != null) {
-                    radioBlockEntity.stop();
+                boolean wasStopped = !runtimeState.playing
+                        && Math.max(0L, runtimeState.positionMs) == 0L
+                        && safe(runtimeState.url).isBlank();
+                if (!wasStopped) {
+                    runtimeState.playing = false;
+                    runtimeState.positionMs = 0L;
+                    runtimeState.trackDurationMs = -1L;
+                    runtimeState.updatedAtMs = now;
+                    runtimeState.url = "";
+                    runtimeState.title = "";
+                    runtimeState.artist = "";
+                    runtimeState.thumbnail = "";
+                    runtimeChanged = true;
+                    if (radioBlockEntity != null) {
+                        radioBlockEntity.stop();
+                    }
                 }
             }
             case SET_VOLUME -> {
-                runtimeState.volume = Mth.clamp(message.volume(), 0f, 2f);
-                runtimeState.updatedAtMs = now;
-                if (radioBlockEntity != null) {
-                    radioBlockEntity.setVolume(message.volume());
+                float clampedVolume = Mth.clamp(message.volume(), 0f, 2f);
+                if (Math.abs(runtimeState.volume - clampedVolume) > 0.0001f) {
+                    preservePlaybackTimelineAnchor(runtimeData, runtimeState, now);
+                    runtimeState.volume = clampedVolume;
+                    runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
+                    if (radioBlockEntity != null) {
+                        radioBlockEntity.setVolume(clampedVolume);
+                    }
                 }
             }
             case SEEK -> {
-                runtimeState.positionMs = Math.max(0L, message.positionMs());
-                runtimeState.updatedAtMs = now;
-                if (radioBlockEntity != null) {
-                    radioBlockEntity.seekTo(message.positionMs());
+                long targetPosition = Math.max(0L, message.positionMs());
+                long currentPosition = runtimeData.currentPositionMs(runtimeState);
+                if (Math.abs(currentPosition - targetPosition) >= 50L || !runtimeState.playing) {
+                    runtimeState.positionMs = targetPosition;
+                    runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
+                    if (radioBlockEntity != null) {
+                        radioBlockEntity.seekTo(targetPosition);
+                    }
                 }
             }
             case SYNC_RUNTIME -> {
-                runtimeState.url = safe(message.url()).isBlank() ? runtimeState.url : safe(message.url());
-                runtimeState.title = safe(message.title()).isBlank() ? runtimeState.title : safe(message.title());
-                runtimeState.artist = safe(message.artist()).isBlank() ? runtimeState.artist : safe(message.artist());
-                runtimeState.thumbnail = safe(message.thumbnail()).isBlank() ? runtimeState.thumbnail : safe(message.thumbnail());
-                runtimeState.positionMs = Math.max(0L, message.positionMs());
+                String syncedUrl = safe(message.url());
+                String syncedTitle = safe(message.title());
+                String syncedArtist = safe(message.artist());
+                String syncedThumbnail = safe(message.thumbnail());
                 long syncedDurationMs = message.trackDurationMs();
-                if (syncedDurationMs > 0L) {
+                String runtimeUrl = safe(runtimeState.url);
+                boolean trackMatches = !runtimeUrl.isBlank()
+                        && ((!syncedUrl.isBlank() && sameTrack(runtimeUrl, syncedUrl)) || syncedUrl.isBlank());
+                boolean changed = false;
+                // Runtime sync packets from clients are advisory only. Never let them override
+                // authoritative transport decisions (play/pause/seek/queue pointer).
+                if (trackMatches && syncedDurationMs > 0L && runtimeState.trackDurationMs != syncedDurationMs) {
                     runtimeState.trackDurationMs = syncedDurationMs;
-                    if (!runtimeState.url.isBlank()) {
-                        runtimeState.knownTrackDurationsMs.put(trackSyncKey(runtimeState.url), syncedDurationMs);
+                    if (runtimeState.knownTrackDurationsMs == null) {
+                        runtimeState.knownTrackDurationsMs = new HashMap<>();
                     }
+                    runtimeState.knownTrackDurationsMs.put(trackSyncKey(runtimeUrl), syncedDurationMs);
+                    changed = true;
                 }
-                runtimeState.playing = true;
-                runtimeState.updatedAtMs = now;
+                if (trackMatches && safe(runtimeState.title).isBlank() && !syncedTitle.isBlank()) {
+                    runtimeState.title = syncedTitle;
+                    changed = true;
+                }
+                if (trackMatches && safe(runtimeState.artist).isBlank() && !syncedArtist.isBlank()) {
+                    runtimeState.artist = syncedArtist;
+                    changed = true;
+                }
+                if (trackMatches && safe(runtimeState.thumbnail).isBlank() && !syncedThumbnail.isBlank()) {
+                    runtimeState.thumbnail = syncedThumbnail;
+                    changed = true;
+                }
+                if (changed) {
+                    runtimeState.updatedAtMs = now;
+                    runtimeChanged = true;
+                }
             }
         }
 
+        if (runtimeChanged && alignQueueStateToCurrentTrack(runtimeState)) {
+            if (radioBlockEntity != null) {
+                radioBlockEntity.setQueueStateJson(runtimeState.queueStateJson);
+            }
+        }
+
+        if (!runtimeChanged) {
+            return;
+        }
         if (radioBlockEntity != null) {
             runtimeState.volume = Mth.clamp(radioBlockEntity.getVolume(), 0f, 2f);
-            runtimeState.queueStateJson = safe(radioBlockEntity.getQueueStateJson());
+            if (safe(runtimeState.queueStateJson).isBlank()) {
+                runtimeState.queueStateJson = safe(radioBlockEntity.getQueueStateJson());
+            }
         }
+        markRuntimeMutation(runtimeState, runtimeKey, now);
         runtimeData.setDirty();
+        syncLoadedBlockEntitiesForRadioId(radioId);
+        if (!blockScoped) {
+            boolean seekEvent = message.action() == ServerboundRadioControlMessage.Action.SEEK;
+            boolean forcePositionSync = seekEvent
+                    || message.action() == ServerboundRadioControlMessage.Action.PLAY_URL
+                    || message.action() == ServerboundRadioControlMessage.Action.STOP
+                    || message.action() == ServerboundRadioControlMessage.Action.SYNC_RUNTIME;
+            broadcastHandheldRuntimeState(player, radioId, runtimeData, runtimeState, forcePositionSync, seekEvent);
+        }
         MediaRadio.LOGGER.debug("Radio control {} for {} by {}", message.action(), !radioId.isBlank() ? radioId : blockPos, player.getGameProfile().getName());
     }
 
@@ -258,68 +438,128 @@ public class SharedMediaManager {
         }
 
         RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
-        RadioRuntimeStateSavedData.RadioRuntimeState previousState = copyState(runtimeData.get(radioId));
-        long previousPosition = runtimeData.currentPositionMs(previousState);
-        String previousQueueForPacket = queueStateForPacket(previousState == null ? "" : previousState.queueStateJson);
+        String runtimeKey = handheldRuntimeKey(radioId);
+        RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
+        ensureSessionIdentity(state, runtimeKey);
+        if (!authorizeRuntimeControl(player, radioId, state, runtimeData, false, null)) {
+            sendSessionCommandResult(
+                    player,
+                    radioId,
+                    state,
+                    false,
+                    ClientboundSessionCommandResultMessage.Reason.UNAUTHORIZED,
+                    ServerboundRequestRadioStateMessage.Context.HANDHELD
+            );
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (isDuplicateCommand(state, player.getUUID(), message.commandId(), now)) {
+            sendSessionCommandResult(
+                    player,
+                    radioId,
+                    state,
+                    false,
+                    ClientboundSessionCommandResultMessage.Reason.DUPLICATE_COMMAND,
+                    ServerboundRequestRadioStateMessage.Context.HANDHELD
+            );
+            return;
+        }
+        if (isStaleRevision(message.knownRevision(), state.revision)) {
+            sendSessionCommandResult(
+                    player,
+                    radioId,
+                    state,
+                    false,
+                    ClientboundSessionCommandResultMessage.Reason.STALE_REVISION,
+                    ServerboundRequestRadioStateMessage.Context.HANDHELD
+            );
+            return;
+        }
+        RadioRuntimeStateSavedData.RadioRuntimeState previousState = copyState(state);
         boolean previousContextActive = shouldBroadcastHandheldContext(player, radioId, previousState);
-        runtimeData.setFromClient(
-                radioId,
-                message.url(),
-                message.title(),
-                message.artist(),
-                message.thumbnail(),
-                message.queueStateJson(),
-                message.volume(),
-                message.positionMs(),
-                message.trackDurationMs(),
-                message.seekSerial(),
-                message.playing(),
-                message.allowInventoryBroadcast()
-        );
+        boolean stateChanged = false;
+        String incomingQueueState = safe(message.queueStateJson());
+        String mergedQueueState = mergeIncomingQueueState(state.queueStateJson, incomingQueueState);
+        if (!safe(state.queueStateJson).equals(mergedQueueState)) {
+            state.queueStateJson = mergedQueueState;
+            stateChanged = true;
+        }
+        boolean incomingInventoryBroadcast = message.allowInventoryBroadcast();
+        if (state.allowInventoryBroadcast != incomingInventoryBroadcast) {
+            state.allowInventoryBroadcast = incomingInventoryBroadcast;
+            stateChanged = true;
+        }
+        long incomingDurationMs = message.trackDurationMs();
+        if (incomingDurationMs > 0L) {
+            long resolvedDuration = incomingDurationMs == Long.MAX_VALUE ? -1L : incomingDurationMs;
+            if (resolvedDuration > 0L && state.trackDurationMs != resolvedDuration) {
+                state.trackDurationMs = resolvedDuration;
+                stateChanged = true;
+            }
+            String incomingUrl = safe(message.url());
+            if (!incomingUrl.isBlank()) {
+                Long previousKnown = state.knownTrackDurationsMs.get(trackSyncKey(incomingUrl));
+                if (previousKnown == null || previousKnown != resolvedDuration) {
+                    state.knownTrackDurationsMs.put(trackSyncKey(incomingUrl), resolvedDuration);
+                    stateChanged = true;
+                }
+            }
+        }
+        boolean refreshedTimelineAnchor = false;
+        String incomingUrl = safe(message.url());
+        if (message.playing() && !incomingUrl.isBlank()) {
+            boolean sameRuntimeTrack = sameTrack(state.url, incomingUrl);
+            if (!sameRuntimeTrack) {
+                state.url = incomingUrl;
+                String incomingTitle = safe(message.title());
+                String incomingArtist = safe(message.artist());
+                String incomingThumbnail = safe(message.thumbnail());
+                if (!incomingTitle.isBlank()) {
+                    state.title = incomingTitle;
+                }
+                if (!incomingArtist.isBlank()) {
+                    state.artist = incomingArtist;
+                }
+                if (!incomingThumbnail.isBlank()) {
+                    state.thumbnail = incomingThumbnail;
+                }
+                state.playing = true;
+                state.positionMs = Math.max(0L, message.positionMs());
+                state.updatedAtMs = now;
+                stateChanged = true;
+                refreshedTimelineAnchor = true;
+            } else {
+                state.positionMs = Math.max(0L, message.positionMs());
+                state.updatedAtMs = now;
+                if (!state.playing) {
+                    state.playing = true;
+                    stateChanged = true;
+                }
+                refreshedTimelineAnchor = true;
+            }
+        }
+        if (alignQueueStateToCurrentTrack(state)) {
+            stateChanged = true;
+        }
 
-        RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
-        int previousSeekSerial = previousState == null ? -1 : previousState.seekSerial;
-        long position = runtimeData.currentPositionMs(state);
-        String queueForPacket = queueStateForPacket(state.queueStateJson);
         boolean contextActive = shouldBroadcastHandheldContext(player, radioId, state);
-        boolean naturalLoopRestart = previousState != null
-                && previousState.playing
-                && state.playing
-                && sameTrack(previousState.url, state.url)
-                && previousPosition >= 2_000L
-                && position + 1_250L < previousPosition;
-        boolean seekEvent = (previousState != null && state.seekSerial != previousSeekSerial) || naturalLoopRestart;
-        boolean forcePositionSync = seekEvent
-                || previousState == null
-                || previousState.playing != state.playing
-                || !sameTrack(previousState.url, state.url);
+        boolean contextChanged = previousContextActive != contextActive;
+        boolean meaningfulMutation = stateChanged || contextChanged;
 
-        if (!seekEvent
-                && !shouldBroadcastHandheldUpdate(previousState, previousPosition, state, position, previousQueueForPacket, queueForPacket, previousContextActive, contextActive)) {
+        if (stateChanged) {
+            if (!refreshedTimelineAnchor) {
+                preservePlaybackTimelineAnchor(runtimeData, state, now);
+            }
+            markRuntimeMutation(state, runtimeKey, now);
+            runtimeData.setDirty();
+            syncLoadedBlockEntitiesForRadioId(radioId);
+        }
+
+        if (!meaningfulMutation) {
             return;
         }
 
-        for (ServerPlayer other : player.server.getPlayerList().getPlayers()) {
-            if (!shouldBroadcastToHandheldListener(player, other)) {
-                continue;
-            }
-            boolean inventoryPlayback = contextActive && isInventoryPlaybackContext(player, radioId);
-            ModNetworking.sendPlayerRadioContext(other, radioId, player.getId(), contextActive, inventoryPlayback);
-            ModNetworking.sendRadioState(other, new ClientboundRadioStateMessage(
-                    radioId,
-                    safe(state.url),
-                    safe(state.title),
-                    safe(state.artist),
-                    safe(state.thumbnail),
-                    queueForPacket,
-                    Mth.clamp(state.volume, 0f, 2f),
-                    position,
-                    System.currentTimeMillis(),
-                    forcePositionSync,
-                    seekEvent,
-                    state.playing
-            ));
-        }
+        broadcastHandheldRuntimeState(player, radioId, runtimeData, state, false, false);
     }
 
     public static void handleRadioStateRequest(ServerPlayer player, ServerboundRequestRadioStateMessage message) {
@@ -328,10 +568,16 @@ public class SharedMediaManager {
             return;
         }
         RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(player.server);
-        RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
+        String runtimeKey = message.context() == ServerboundRequestRadioStateMessage.Context.BLOCK
+                ? blockRuntimeKey(radioId)
+                : handheldRuntimeKey(radioId);
+        RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
+        ensureSessionIdentity(state, runtimeKey);
         long position = runtimeData.currentPositionMs(state);
         ModNetworking.sendRadioState(player, new ClientboundRadioStateMessage(
                 radioId,
+                safe(state.sessionId),
+                Math.max(0L, state.revision),
                 safe(state.url),
                 safe(state.title),
                 safe(state.artist),
@@ -359,9 +605,26 @@ public class SharedMediaManager {
             return;
         }
         RadioRuntimeStateSavedData runtimeData = RadioRuntimeStateSavedData.get(server);
-        RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.getOrCreate(radioId);
+        String runtimeKey = blockRuntimeKey(radioId);
+        RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(
+                runtimeData,
+                runtimeKey,
+                radioId
+        );
+        ensureSessionIdentity(state, runtimeKey);
         long nowMs = System.currentTimeMillis();
         boolean changed = false;
+        String blockOwnerId = safe(radioBlockEntity.getOwnerId());
+        String runtimeOwnerId = safe(state.ownerId);
+        if (runtimeOwnerId.isBlank()) {
+            if (!blockOwnerId.isBlank()) {
+                state.ownerId = blockOwnerId;
+                runtimeOwnerId = blockOwnerId;
+                changed = true;
+            }
+        } else if (!runtimeOwnerId.equals(blockOwnerId)) {
+            radioBlockEntity.setOwnerId(runtimeOwnerId);
+        }
         if (state.playing && !safe(state.url).isBlank()) {
             if (state.trackDurationMs <= 0L) {
                 long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
@@ -378,6 +641,8 @@ public class SharedMediaManager {
             }
         }
         if (changed) {
+            preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
+            markRuntimeMutation(state, runtimeKey, nowMs);
             runtimeData.setDirty();
         }
         long position = runtimeData.currentPositionMs(state);
@@ -388,6 +653,653 @@ public class SharedMediaManager {
         if (state.playing && state.url != null && !state.url.isBlank()) {
             radioBlockEntity.play();
         }
+    }
+
+    private static String handheldRuntimeKey(String radioId) {
+        return sessionRuntimeKey(radioId);
+    }
+
+    private static String blockRuntimeKey(String radioId) {
+        return sessionRuntimeKey(radioId);
+    }
+
+    private static String sessionRuntimeKey(String radioId) {
+        return safe(radioId);
+    }
+
+    private static String scopedRuntimeKey(String scope, String radioId) {
+        return safe(scope) + ":" + safe(radioId);
+    }
+
+    private static RadioRuntimeStateSavedData.RadioRuntimeState resolveScopedState(
+            RadioRuntimeStateSavedData runtimeData,
+            String scopedKey,
+            String legacyRadioId
+    ) {
+        if (runtimeData == null) {
+            return null;
+        }
+        String radioId = safe(legacyRadioId);
+        String primaryKey = safe(scopedKey);
+        if (primaryKey.isBlank()) {
+            primaryKey = sessionRuntimeKey(radioId);
+        }
+        if (primaryKey.isBlank()) {
+            return null;
+        }
+
+        Map<String, RadioRuntimeStateSavedData.RadioRuntimeState> candidates = new LinkedHashMap<>();
+        RadioRuntimeStateSavedData.RadioRuntimeState primary = runtimeData.get(primaryKey);
+        if (primary != null) {
+            candidates.put(primaryKey, primary);
+        }
+
+        if (!radioId.isBlank()) {
+            String legacyKey = safe(radioId);
+            if (!legacyKey.isBlank() && !legacyKey.equals(primaryKey)) {
+                RadioRuntimeStateSavedData.RadioRuntimeState legacy = runtimeData.get(legacyKey);
+                if (legacy != null) {
+                    candidates.put(legacyKey, legacy);
+                }
+            }
+            String blockAlias = scopedRuntimeKey(RUNTIME_SCOPE_BLOCK, radioId);
+            if (!blockAlias.equals(primaryKey)) {
+                RadioRuntimeStateSavedData.RadioRuntimeState blockState = runtimeData.get(blockAlias);
+                if (blockState != null) {
+                    candidates.put(blockAlias, blockState);
+                }
+            }
+            String handheldAlias = scopedRuntimeKey(RUNTIME_SCOPE_HANDHELD, radioId);
+            if (!handheldAlias.equals(primaryKey)) {
+                RadioRuntimeStateSavedData.RadioRuntimeState handheldState = runtimeData.get(handheldAlias);
+                if (handheldState != null) {
+                    candidates.put(handheldAlias, handheldState);
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        String preferredKey = null;
+        RadioRuntimeStateSavedData.RadioRuntimeState preferredState = null;
+        for (Map.Entry<String, RadioRuntimeStateSavedData.RadioRuntimeState> candidate : candidates.entrySet()) {
+            if (preferredState == null || isStateNewer(candidate.getValue(), preferredState)) {
+                preferredState = candidate.getValue();
+                preferredKey = candidate.getKey();
+            }
+        }
+        if (preferredState == null) {
+            return null;
+        }
+
+        boolean migrated = false;
+        if (!primaryKey.equals(preferredKey) || primary == null) {
+            RadioRuntimeStateSavedData.RadioRuntimeState migratedState = copyState(preferredState);
+            if (migratedState != null) {
+                ensureSessionIdentity(migratedState, primaryKey);
+                runtimeData.states().put(primaryKey, migratedState);
+                primary = migratedState;
+                migrated = true;
+            }
+        }
+        for (String candidateKey : new HashSet<>(candidates.keySet())) {
+            if (candidateKey.equals(primaryKey)) {
+                continue;
+            }
+            if (runtimeData.states().remove(candidateKey) != null) {
+                migrated = true;
+            }
+        }
+        if (migrated) {
+            runtimeData.setDirty();
+        }
+        if (primary == null) {
+            primary = runtimeData.get(primaryKey);
+        }
+        ensureSessionIdentity(primary, primaryKey);
+        return primary;
+    }
+
+    private static RadioRuntimeStateSavedData.RadioRuntimeState resolveOrCreateScopedState(
+            RadioRuntimeStateSavedData runtimeData,
+            String scopedKey,
+            String legacyRadioId
+    ) {
+        RadioRuntimeStateSavedData.RadioRuntimeState state = resolveScopedState(runtimeData, scopedKey, legacyRadioId);
+        if (state != null) {
+            return state;
+        }
+        RadioRuntimeStateSavedData.RadioRuntimeState created = runtimeData.getOrCreate(scopedKey);
+        ensureSessionIdentity(created, scopedKey);
+        return created;
+    }
+
+    private static void ensureSessionIdentity(RadioRuntimeStateSavedData.RadioRuntimeState state, String sessionId) {
+        if (state == null) {
+            return;
+        }
+        String resolved = safe(sessionId);
+        if (!resolved.isBlank()) {
+            state.sessionId = resolved;
+        } else if (safe(state.sessionId).isBlank()) {
+            state.sessionId = UUID.randomUUID().toString();
+        }
+        state.revision = Math.max(0L, state.revision);
+    }
+
+    private static void markRuntimeMutation(RadioRuntimeStateSavedData.RadioRuntimeState state, String sessionId, long updatedAtMs) {
+        if (state == null) {
+            return;
+        }
+        ensureSessionIdentity(state, sessionId);
+        state.revision = Math.max(0L, state.revision) + 1L;
+        state.updatedAtMs = Math.max(0L, updatedAtMs);
+    }
+
+    private static boolean isStaleRevision(long knownRevision, long currentRevision) {
+        return knownRevision >= 0L && currentRevision > knownRevision;
+    }
+
+    private static boolean isDuplicateCommand(
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            UUID playerUuid,
+            long commandId,
+            long nowMs
+    ) {
+        if (state == null || playerUuid == null || commandId < 0L) {
+            return false;
+        }
+        String sessionId = safe(state.sessionId);
+        if (sessionId.isBlank()) {
+            return false;
+        }
+        String dedupeKey = sessionId + "|" + playerUuid + "|" + commandId;
+        synchronized (RECENT_SESSION_COMMANDS) {
+            RECENT_SESSION_COMMANDS.entrySet().removeIf(entry -> nowMs - entry.getValue() > COMMAND_DEDUPE_WINDOW_MS);
+            Long existing = RECENT_SESSION_COMMANDS.putIfAbsent(dedupeKey, nowMs);
+            return existing != null;
+        }
+    }
+
+    private static void sendSessionCommandResult(
+            ServerPlayer player,
+            String radioId,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            boolean accepted,
+            ClientboundSessionCommandResultMessage.Reason reason,
+            ServerboundRequestRadioStateMessage.Context context
+    ) {
+        if (player == null) {
+            return;
+        }
+        String sessionId = state == null ? "" : safe(state.sessionId);
+        long revision = state == null ? 0L : Math.max(0L, state.revision);
+        ModNetworking.sendSessionCommandResult(
+                player,
+                new ClientboundSessionCommandResultMessage(
+                        safe(radioId),
+                        sessionId,
+                        revision,
+                        accepted,
+                        reason == null ? ClientboundSessionCommandResultMessage.Reason.NONE : reason,
+                        context == null ? ServerboundRequestRadioStateMessage.Context.HANDHELD : context
+                )
+        );
+    }
+
+    private static boolean authorizeRuntimeControl(
+            ServerPlayer player,
+            String radioId,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            RadioRuntimeStateSavedData runtimeData,
+            boolean blockScoped,
+            RadioBlockEntity radioBlockEntity
+    ) {
+        if (player == null || state == null || radioId == null || radioId.isBlank()) {
+            return false;
+        }
+        return blockScoped
+                ? authorizeBlockRuntimeControl(player, state, runtimeData, radioBlockEntity)
+                : authorizeHandheldRuntimeControl(player, radioId, state, runtimeData);
+    }
+
+    private static boolean authorizeBlockRuntimeControl(
+            ServerPlayer player,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            RadioRuntimeStateSavedData runtimeData,
+            RadioBlockEntity radioBlockEntity
+    ) {
+        if (player == null || state == null) {
+            return false;
+        }
+        String playerId = safe(player.getStringUUID());
+        if (playerId.isBlank()) {
+            return false;
+        }
+
+        String runtimeOwnerId = safe(state.ownerId);
+        if (radioBlockEntity != null) {
+            String blockOwnerId = safe(radioBlockEntity.getOwnerId());
+            if (runtimeOwnerId.isBlank()) {
+                String resolvedOwner = blockOwnerId.isBlank() ? playerId : blockOwnerId;
+                if (!resolvedOwner.equals(runtimeOwnerId)) {
+                    state.ownerId = resolvedOwner;
+                    if (runtimeData != null) {
+                        runtimeData.setDirty();
+                    }
+                    runtimeOwnerId = resolvedOwner;
+                }
+                if (!resolvedOwner.equals(blockOwnerId)) {
+                    radioBlockEntity.setOwnerId(resolvedOwner);
+                }
+            } else if (!runtimeOwnerId.equals(blockOwnerId)) {
+                radioBlockEntity.setOwnerId(runtimeOwnerId);
+            }
+        }
+
+        if (runtimeOwnerId.isBlank()) {
+            state.ownerId = playerId;
+            if (runtimeData != null) {
+                runtimeData.setDirty();
+            }
+            return true;
+        }
+        return runtimeOwnerId.equals(playerId);
+    }
+
+    private static boolean authorizeHandheldRuntimeControl(
+            ServerPlayer player,
+            String radioId,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            RadioRuntimeStateSavedData runtimeData
+    ) {
+        if (player == null || radioId == null || radioId.isBlank() || state == null) {
+            return false;
+        }
+        ItemStack matchingStack = findPlayerRadioStackById(player, radioId);
+        if (matchingStack.isEmpty()) {
+            return false;
+        }
+        String playerId = safe(player.getStringUUID());
+        if (playerId.isBlank()) {
+            return false;
+        }
+
+        String stackOwnerId = safe(net.jacobwasbeast.mediaradio.item.RadioItem.getOwnerId(matchingStack));
+        if (!stackOwnerId.isBlank() && !stackOwnerId.equals(playerId)) {
+            return false;
+        }
+
+        String runtimeOwnerId = safe(state.ownerId);
+        String resolvedOwnerId = !stackOwnerId.isBlank() ? stackOwnerId : runtimeOwnerId;
+        if (resolvedOwnerId.isBlank()) {
+            resolvedOwnerId = playerId;
+        }
+        if (!resolvedOwnerId.equals(playerId)) {
+            return false;
+        }
+        if (!resolvedOwnerId.equals(runtimeOwnerId)) {
+            state.ownerId = resolvedOwnerId;
+            if (runtimeData != null) {
+                runtimeData.setDirty();
+            }
+        }
+        return true;
+    }
+
+    private static ItemStack findPlayerRadioStackById(ServerPlayer player, String radioId) {
+        if (player == null || radioId == null || radioId.isBlank()) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack main = player.getMainHandItem();
+        if (isMatchingRadioStack(main, radioId)) {
+            return main;
+        }
+        ItemStack off = player.getOffhandItem();
+        if (isMatchingRadioStack(off, radioId)) {
+            return off;
+        }
+        for (ItemStack stack : player.getInventory().items) {
+            if (isMatchingRadioStack(stack, radioId)) {
+                return stack;
+            }
+        }
+        for (ItemStack stack : player.getInventory().offhand) {
+            if (isMatchingRadioStack(stack, radioId)) {
+                return stack;
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
+    private static boolean isMatchingRadioStack(ItemStack stack, String radioId) {
+        if (stack == null || stack.isEmpty() || radioId == null || radioId.isBlank()) {
+            return false;
+        }
+        if (!stack.is(net.jacobwasbeast.mediaradio.registry.ModItems.RADIO_ITEM)) {
+            return false;
+        }
+        return radioId.equals(net.jacobwasbeast.mediaradio.item.RadioItem.getRadioId(stack));
+    }
+
+    private static void preservePlaybackTimelineAnchor(
+            RadioRuntimeStateSavedData runtimeData,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            long nowMs
+    ) {
+        if (runtimeData == null || state == null || !state.playing) {
+            return;
+        }
+        state.positionMs = runtimeData.currentPositionMs(state);
+        state.updatedAtMs = Math.max(0L, nowMs);
+    }
+
+    private static String mergeIncomingQueueState(String existingQueueStateJson, String incomingQueueStateJson) {
+        String incomingJson = safe(incomingQueueStateJson);
+        if (incomingJson.isBlank()) {
+            return "";
+        }
+
+        QueueStatePayload incomingPayload = parseQueueState(incomingJson);
+        if (incomingPayload == null) {
+            return incomingJson;
+        }
+        alignQueuePointer(incomingPayload);
+        if (!incomingPayload.partial) {
+            return GSON.toJson(incomingPayload);
+        }
+
+        QueueStatePayload existingPayload = parseQueueState(existingQueueStateJson);
+        if (existingPayload == null) {
+            return GSON.toJson(incomingPayload);
+        }
+        if (countQueueIdOverlap(existingPayload, incomingPayload) == 0) {
+            return GSON.toJson(incomingPayload);
+        }
+
+        QueueStatePayload merged = copyQueuePayload(existingPayload);
+        merged.loopMode = incomingPayload.loopMode == null ? merged.loopMode : incomingPayload.loopMode;
+        mergeQueueEntries(merged, incomingPayload);
+        applyIncomingQueuePointer(merged, incomingPayload);
+        alignQueuePointer(merged);
+        merged.partial = merged.partial && incomingPayload.partial;
+        return GSON.toJson(merged);
+    }
+
+    private static boolean alignQueueStateToCurrentTrack(RadioRuntimeStateSavedData.RadioRuntimeState state) {
+        if (state == null) {
+            return false;
+        }
+        String currentUrl = safe(state.url);
+        if (currentUrl.isBlank()) {
+            return false;
+        }
+
+        QueueStatePayload payload = parseQueueState(state.queueStateJson);
+        boolean changed = false;
+        if (payload == null) {
+            payload = new QueueStatePayload();
+            changed = true;
+        }
+        if (payload.loopMode == null) {
+            payload.loopMode = QueueLoopMode.ALL;
+            changed = true;
+        }
+
+        int preferredIndex = resolveCurrentQueueIndex(payload, currentUrl);
+        int matchedIndex = -1;
+        if (payload.entries != null) {
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry == null || !sameTrack(currentUrl, entry.url)) {
+                    continue;
+                }
+                if (matchedIndex < 0) {
+                    matchedIndex = i;
+                    continue;
+                }
+                int baseline = preferredIndex < 0 ? 0 : preferredIndex;
+                int currentDistance = Math.abs(matchedIndex - baseline);
+                int candidateDistance = Math.abs(i - baseline);
+                if (candidateDistance < currentDistance) {
+                    matchedIndex = i;
+                }
+            }
+        }
+
+        if (matchedIndex < 0) {
+            QueueMediaPayload currentEntry = new QueueMediaPayload();
+            currentEntry.queueItemId = newQueueItemId();
+            currentEntry.url = currentUrl;
+            currentEntry.title = safe(state.title);
+            currentEntry.artist = safe(state.artist);
+            currentEntry.thumbnail = safe(state.thumbnail);
+            int insertIndex = preferredIndex < 0 ? payload.entries.size() : Math.max(0, Math.min(preferredIndex, payload.entries.size()));
+            payload.entries.add(insertIndex, currentEntry);
+            matchedIndex = insertIndex;
+            changed = true;
+        } else {
+            QueueMediaPayload entry = payload.entries.get(matchedIndex);
+            String stateTitle = safe(state.title);
+            String stateArtist = safe(state.artist);
+            String stateThumbnail = safe(state.thumbnail);
+            if (!stateTitle.isBlank() && !stateTitle.equals(safe(entry.title))) {
+                entry.title = stateTitle;
+                changed = true;
+            }
+            if (!stateArtist.isBlank() && !stateArtist.equals(safe(entry.artist))) {
+                entry.artist = stateArtist;
+                changed = true;
+            }
+            if (!stateThumbnail.isBlank() && !stateThumbnail.equals(safe(entry.thumbnail))) {
+                entry.thumbnail = stateThumbnail;
+                changed = true;
+            }
+            if (safe(entry.queueItemId).isBlank()) {
+                entry.queueItemId = newQueueItemId();
+                changed = true;
+            }
+        }
+
+        QueueMediaPayload matchedEntry = payload.entries.get(matchedIndex);
+        String matchedId = safe(matchedEntry.queueItemId);
+        if (!matchedId.equals(safe(payload.currentQueueItemId))) {
+            payload.currentQueueItemId = matchedId;
+            changed = true;
+        }
+        if (payload.queueIndex != matchedIndex) {
+            payload.queueIndex = matchedIndex;
+            changed = true;
+        }
+        alignQueuePointer(payload);
+
+        String alignedJson = GSON.toJson(payload);
+        if (!alignedJson.equals(safe(state.queueStateJson))) {
+            state.queueStateJson = alignedJson;
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static QueueStatePayload copyQueuePayload(QueueStatePayload source) {
+        QueueStatePayload copy = new QueueStatePayload();
+        if (source == null) {
+            return copy;
+        }
+        copy.currentQueueItemId = safe(source.currentQueueItemId);
+        copy.queueIndex = source.queueIndex;
+        copy.loopMode = source.loopMode == null ? QueueLoopMode.ALL : source.loopMode;
+        copy.partial = source.partial;
+        if (source.entries == null) {
+            return copy;
+        }
+        for (QueueMediaPayload entry : source.entries) {
+            if (entry == null || safe(entry.url).isBlank()) {
+                continue;
+            }
+            copy.entries.add(copyQueueEntry(entry));
+        }
+        return copy;
+    }
+
+    private static int countQueueIdOverlap(QueueStatePayload left, QueueStatePayload right) {
+        if (left == null || right == null || left.entries == null || right.entries == null
+                || left.entries.isEmpty() || right.entries.isEmpty()) {
+            return 0;
+        }
+        Set<String> leftIds = new HashSet<>();
+        for (QueueMediaPayload entry : left.entries) {
+            String queueItemId = safe(entry == null ? "" : entry.queueItemId);
+            if (!queueItemId.isBlank()) {
+                leftIds.add(queueItemId);
+            }
+        }
+        if (leftIds.isEmpty()) {
+            return 0;
+        }
+        int overlap = 0;
+        for (QueueMediaPayload entry : right.entries) {
+            String queueItemId = safe(entry == null ? "" : entry.queueItemId);
+            if (!queueItemId.isBlank() && leftIds.contains(queueItemId)) {
+                overlap++;
+            }
+        }
+        return overlap;
+    }
+
+    private static void mergeQueueEntries(QueueStatePayload target, QueueStatePayload incoming) {
+        if (target == null || target.entries == null || incoming == null || incoming.entries == null) {
+            return;
+        }
+        Map<String, QueueMediaPayload> byQueueItemId = new LinkedHashMap<>();
+        for (QueueMediaPayload entry : target.entries) {
+            String queueItemId = safe(entry == null ? "" : entry.queueItemId);
+            if (!queueItemId.isBlank()) {
+                byQueueItemId.put(queueItemId, entry);
+            }
+        }
+        for (QueueMediaPayload incomingEntry : incoming.entries) {
+            if (incomingEntry == null || safe(incomingEntry.url).isBlank()) {
+                continue;
+            }
+            String incomingQueueItemId = safe(incomingEntry.queueItemId);
+            if (!incomingQueueItemId.isBlank()) {
+                QueueMediaPayload existing = byQueueItemId.get(incomingQueueItemId);
+                if (existing != null) {
+                    mergeQueueEntry(existing, incomingEntry);
+                    continue;
+                }
+                QueueMediaPayload copy = copyQueueEntry(incomingEntry);
+                target.entries.add(copy);
+                byQueueItemId.put(copy.queueItemId, copy);
+                continue;
+            }
+
+            QueueMediaPayload existingByTrack = null;
+            for (QueueMediaPayload candidate : target.entries) {
+                if (candidate != null && sameTrack(candidate.url, incomingEntry.url)) {
+                    existingByTrack = candidate;
+                    break;
+                }
+            }
+            if (existingByTrack != null) {
+                mergeQueueEntry(existingByTrack, incomingEntry);
+            } else {
+                target.entries.add(copyQueueEntry(incomingEntry));
+            }
+        }
+    }
+
+    private static void applyIncomingQueuePointer(QueueStatePayload target, QueueStatePayload incoming) {
+        if (target == null || incoming == null) {
+            return;
+        }
+        String incomingPointerId = safe(incoming.currentQueueItemId);
+        if (!incomingPointerId.isBlank()) {
+            for (int i = 0; i < target.entries.size(); i++) {
+                QueueMediaPayload entry = target.entries.get(i);
+                if (entry != null && incomingPointerId.equals(safe(entry.queueItemId))) {
+                    target.currentQueueItemId = incomingPointerId;
+                    target.queueIndex = i;
+                    return;
+                }
+            }
+        }
+
+        String pointerUrl = resolveQueuePointerUrl(incoming);
+        if (!pointerUrl.isBlank()) {
+            for (int i = 0; i < target.entries.size(); i++) {
+                QueueMediaPayload entry = target.entries.get(i);
+                if (entry != null && sameTrack(pointerUrl, entry.url)) {
+                    target.currentQueueItemId = safe(entry.queueItemId);
+                    target.queueIndex = i;
+                    return;
+                }
+            }
+        }
+    }
+
+    private static String resolveQueuePointerUrl(QueueStatePayload payload) {
+        if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            return "";
+        }
+        String pointerId = safe(payload.currentQueueItemId);
+        if (!pointerId.isBlank()) {
+            for (QueueMediaPayload entry : payload.entries) {
+                if (entry != null && pointerId.equals(safe(entry.queueItemId))) {
+                    return safe(entry.url);
+                }
+            }
+        }
+        if (payload.queueIndex >= 0 && payload.queueIndex < payload.entries.size()) {
+            QueueMediaPayload entry = payload.entries.get(payload.queueIndex);
+            return entry == null ? "" : safe(entry.url);
+        }
+        return "";
+    }
+
+    private static QueueMediaPayload copyQueueEntry(QueueMediaPayload source) {
+        QueueMediaPayload copy = new QueueMediaPayload();
+        copy.queueItemId = safe(source == null ? "" : source.queueItemId);
+        if (copy.queueItemId.isBlank()) {
+            copy.queueItemId = newQueueItemId();
+        }
+        copy.url = safe(source == null ? "" : source.url);
+        copy.title = safe(source == null ? "" : source.title);
+        copy.artist = safe(source == null ? "" : source.artist);
+        copy.thumbnail = safe(source == null ? "" : source.thumbnail);
+        return copy;
+    }
+
+    private static void mergeQueueEntry(QueueMediaPayload target, QueueMediaPayload incoming) {
+        if (target == null || incoming == null) {
+            return;
+        }
+        if (safe(target.queueItemId).isBlank()) {
+            target.queueItemId = newQueueItemId();
+        }
+        String incomingUrl = safe(incoming.url);
+        if (!incomingUrl.isBlank()) {
+            target.url = incomingUrl;
+        }
+        String incomingTitle = safe(incoming.title);
+        if (!incomingTitle.isBlank()) {
+            target.title = incomingTitle;
+        }
+        String incomingArtist = safe(incoming.artist);
+        if (!incomingArtist.isBlank()) {
+            target.artist = incomingArtist;
+        }
+        String incomingThumbnail = safe(incoming.thumbnail);
+        if (!incomingThumbnail.isBlank()) {
+            target.thumbnail = incomingThumbnail;
+        }
+    }
+
+    private static String newQueueItemId() {
+        return UUID.randomUUID().toString();
     }
 
     private static String safe(String value) {
@@ -402,19 +1314,53 @@ public class SharedMediaManager {
     ) {
         SharedMediaSnapshot merged = new SharedMediaSnapshot();
 
-        // Library remains collaborative/global and follows incoming client state.
-        merged.library.putAll(incoming.library);
+        // Keep existing library as baseline so playlists cannot lose entries due to
+        // partial/stale client snapshots.
+        for (Map.Entry<String, SharedMediaSnapshot.MediaEntry> entry : current.library.entrySet()) {
+            String mediaId = safe(entry.getKey());
+            SharedMediaSnapshot.MediaEntry mediaEntry = cloneMedia(entry.getValue(), mediaId);
+            if (mediaEntry != null) {
+                String resolvedId = mediaId.isBlank() ? safe(mediaEntry.id) : mediaId;
+                if (!resolvedId.isBlank()) {
+                    merged.library.put(resolvedId, mediaEntry);
+                }
+            }
+        }
+        // Merge incoming media updates without wiping existing metadata on blank fields.
+        for (Map.Entry<String, SharedMediaSnapshot.MediaEntry> entry : incoming.library.entrySet()) {
+            String mediaId = safe(entry.getKey());
+            if (mediaId.isBlank()) {
+                continue;
+            }
+            SharedMediaSnapshot.MediaEntry incomingEntry = cloneMedia(entry.getValue(), mediaId);
+            if (incomingEntry == null) {
+                continue;
+            }
+            String resolvedId = mediaId.isBlank() ? safe(incomingEntry.id) : mediaId;
+            if (resolvedId.isBlank()) {
+                continue;
+            }
+            SharedMediaSnapshot.MediaEntry currentEntry = merged.library.get(resolvedId);
+            if (currentEntry == null) {
+                merged.library.put(resolvedId, incomingEntry);
+                continue;
+            }
+            merged.library.put(resolvedId, mergeMedia(currentEntry, incomingEntry, resolvedId));
+        }
 
         // Start from current playlists so unauthorized deletions/edits are ignored.
         for (Map.Entry<String, SharedMediaSnapshot.PlaylistEntry> entry : current.playlists.entrySet()) {
             merged.playlists.put(entry.getKey(), clonePlaylist(entry.getValue()));
         }
 
-        // Apply owner-authorized deletions.
-        for (Map.Entry<String, SharedMediaSnapshot.PlaylistEntry> entry : current.playlists.entrySet()) {
-            String playlistId = entry.getKey();
-            SharedMediaSnapshot.PlaylistEntry existing = entry.getValue();
-            if (!incoming.playlists.containsKey(playlistId) && existing != null && existing.canEdit(playerId)) {
+        // Apply explicit owner-authorized deletions (tombstones).
+        for (String deletedPlaylistId : incoming.deletedPlaylistIds) {
+            String playlistId = safe(deletedPlaylistId);
+            if (playlistId.isBlank()) {
+                continue;
+            }
+            SharedMediaSnapshot.PlaylistEntry existing = current.playlists.get(playlistId);
+            if (existing != null && existing.canEdit(playerId)) {
                 merged.playlists.remove(playlistId);
             }
         }
@@ -460,10 +1406,28 @@ public class SharedMediaManager {
         // Drop playlist media references that no longer exist in library.
         merged.playlists.values().forEach(playlist -> {
             if (playlist != null && playlist.mediaIds != null) {
-                playlist.mediaIds.removeIf(mediaId -> mediaId == null || mediaId.isBlank() || !merged.library.containsKey(mediaId));
+                playlist.mediaIds.removeIf(mediaId -> {
+                    String safeMediaId = safe(mediaId);
+                    if (safeMediaId.isBlank()) {
+                        return true;
+                    }
+                    if (merged.library.containsKey(safeMediaId)) {
+                        return false;
+                    }
+                    SharedMediaSnapshot.MediaEntry fallback = cloneMedia(current.library.get(safeMediaId), safeMediaId);
+                    if (fallback == null) {
+                        fallback = cloneMedia(incoming.library.get(safeMediaId), safeMediaId);
+                    }
+                    if (fallback != null) {
+                        merged.library.put(safeMediaId, fallback);
+                        return false;
+                    }
+                    return true;
+                });
             }
         });
 
+        merged.deletedPlaylistIds.clear();
         return merged.sanitize();
     }
 
@@ -483,6 +1447,60 @@ public class SharedMediaManager {
         copy.invitedPlayerNames = source.invitedPlayerNames == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.invitedPlayerNames);
         copy.sanitize();
         return copy;
+    }
+
+    private static SharedMediaSnapshot.MediaEntry cloneMedia(SharedMediaSnapshot.MediaEntry source, String mediaId) {
+        if (source == null) {
+            return null;
+        }
+        SharedMediaSnapshot.MediaEntry copy = new SharedMediaSnapshot.MediaEntry();
+        copy.id = safe(mediaId).isBlank() ? safe(source.id) : safe(mediaId);
+        copy.url = safe(source.url);
+        copy.title = safe(source.title);
+        copy.artist = safe(source.artist);
+        copy.thumbnail = safe(source.thumbnail);
+        copy.tags = source.tags == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.tags);
+        copy.hiddenFromLibrary = source.hiddenFromLibrary;
+        copy.sanitize();
+        if (copy.url.isBlank()) {
+            return null;
+        }
+        if (copy.id.isBlank()) {
+            copy.id = SharedMediaSnapshot.idForUrl(copy.url);
+        }
+        return copy;
+    }
+
+    private static SharedMediaSnapshot.MediaEntry mergeMedia(
+            SharedMediaSnapshot.MediaEntry current,
+            SharedMediaSnapshot.MediaEntry incoming,
+            String mediaId
+    ) {
+        SharedMediaSnapshot.MediaEntry merged = cloneMedia(current, mediaId);
+        if (merged == null) {
+            merged = cloneMedia(incoming, mediaId);
+            return merged == null ? null : merged;
+        }
+        if (incoming != null) {
+            if (!safe(incoming.url).isBlank()) {
+                merged.url = safe(incoming.url);
+            }
+            if (!safe(incoming.title).isBlank()) {
+                merged.title = safe(incoming.title);
+            }
+            if (!safe(incoming.artist).isBlank()) {
+                merged.artist = safe(incoming.artist);
+            }
+            if (!safe(incoming.thumbnail).isBlank()) {
+                merged.thumbnail = safe(incoming.thumbnail);
+            }
+            if (incoming.tags != null && !incoming.tags.isEmpty()) {
+                merged.tags = new java.util.ArrayList<>(incoming.tags);
+            }
+            merged.hiddenFromLibrary = merged.hiddenFromLibrary && incoming.hiddenFromLibrary;
+        }
+        merged.sanitize();
+        return merged;
     }
 
     private static boolean shouldBroadcastHandheldContext(ServerPlayer player, String radioId, RadioRuntimeStateSavedData.RadioRuntimeState state) {
@@ -564,6 +1582,8 @@ public class SharedMediaManager {
             return null;
         }
         RadioRuntimeStateSavedData.RadioRuntimeState copy = new RadioRuntimeStateSavedData.RadioRuntimeState();
+        copy.sessionId = safe(source.sessionId);
+        copy.revision = Math.max(0L, source.revision);
         copy.url = safe(source.url);
         copy.title = safe(source.title);
         copy.artist = safe(source.artist);
@@ -578,8 +1598,108 @@ public class SharedMediaManager {
         copy.seekSerial = Math.max(0, source.seekSerial);
         copy.playing = source.playing;
         copy.allowInventoryBroadcast = source.allowInventoryBroadcast;
+        copy.ownerId = safe(source.ownerId);
         copy.updatedAtMs = Math.max(0L, source.updatedAtMs);
         return copy;
+    }
+
+    private static boolean isStateNewer(
+            RadioRuntimeStateSavedData.RadioRuntimeState candidate,
+            RadioRuntimeStateSavedData.RadioRuntimeState baseline
+    ) {
+        if (candidate == null) {
+            return false;
+        }
+        if (baseline == null) {
+            return true;
+        }
+        long candidateRevision = Math.max(0L, candidate.revision);
+        long baselineRevision = Math.max(0L, baseline.revision);
+        if (candidateRevision != baselineRevision) {
+            return candidateRevision > baselineRevision;
+        }
+        long candidateUpdatedAt = Math.max(0L, candidate.updatedAtMs);
+        long baselineUpdatedAt = Math.max(0L, baseline.updatedAtMs);
+        if (candidateUpdatedAt != baselineUpdatedAt) {
+            return candidateUpdatedAt > baselineUpdatedAt;
+        }
+        if (candidate.playing != baseline.playing) {
+            return candidate.playing;
+        }
+        if (!safe(candidate.url).isBlank() && safe(baseline.url).isBlank()) {
+            return true;
+        }
+        return false;
+    }
+
+    private static void syncLoadedBlockEntitiesForRadioId(String radioId) {
+        String resolvedRadioId = safe(radioId);
+        if (resolvedRadioId.isBlank()) {
+            return;
+        }
+        for (RadioBlockEntity blockEntity : RadioBlockEntity.loadedForRadioId(resolvedRadioId)) {
+            if (blockEntity == null || blockEntity.isRemoved()) {
+                continue;
+            }
+            applyRuntimeStateToBlockEntity(blockEntity);
+        }
+    }
+
+    private static void broadcastHandheldRuntimeState(
+            ServerPlayer owner,
+            String radioId,
+            RadioRuntimeStateSavedData runtimeData,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            boolean forcePositionSync,
+            boolean seekEvent
+    ) {
+        if (owner == null || owner.server == null || runtimeData == null || state == null || radioId == null || radioId.isBlank()) {
+            return;
+        }
+
+        boolean contextActive = shouldBroadcastHandheldContext(owner, radioId, state);
+        long position = runtimeData.currentPositionMs(state);
+        String queueForPacket = queueStateForPacket(state.queueStateJson);
+        long sentAtMs = System.currentTimeMillis();
+        ModNetworking.sendRadioState(owner, new ClientboundRadioStateMessage(
+                radioId,
+                safe(state.sessionId),
+                Math.max(0L, state.revision),
+                safe(state.url),
+                safe(state.title),
+                safe(state.artist),
+                safe(state.thumbnail),
+                queueForPacket,
+                Mth.clamp(state.volume, 0f, 2f),
+                position,
+                sentAtMs,
+                forcePositionSync,
+                seekEvent,
+                state.playing
+        ));
+        for (ServerPlayer other : owner.server.getPlayerList().getPlayers()) {
+            if (!shouldBroadcastToHandheldListener(owner, other)) {
+                continue;
+            }
+            boolean inventoryPlayback = contextActive && isInventoryPlaybackContext(owner, radioId);
+            ModNetworking.sendPlayerRadioContext(other, radioId, owner.getId(), contextActive, inventoryPlayback);
+            ModNetworking.sendRadioState(other, new ClientboundRadioStateMessage(
+                    radioId,
+                    safe(state.sessionId),
+                    Math.max(0L, state.revision),
+                    safe(state.url),
+                    safe(state.title),
+                    safe(state.artist),
+                    safe(state.thumbnail),
+                    queueForPacket,
+                    Mth.clamp(state.volume, 0f, 2f),
+                    position,
+                    sentAtMs,
+                    forcePositionSync,
+                    seekEvent,
+                    state.playing
+            ));
+        }
     }
 
     private static void syncActiveHandheldRadiosToPlayer(ServerPlayer target) {
@@ -597,7 +1717,11 @@ public class SharedMediaManager {
                 continue;
             }
             for (String radioId : candidateRadioIds) {
-                RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.get(radioId);
+                RadioRuntimeStateSavedData.RadioRuntimeState state = resolveScopedState(
+                        runtimeData,
+                        handheldRuntimeKey(radioId),
+                        radioId
+                );
                 if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
                     continue;
                 }
@@ -605,6 +1729,8 @@ public class SharedMediaManager {
                 ModNetworking.sendPlayerRadioContext(target, radioId, owner.getId(), true, inventoryPlayback);
                 ModNetworking.sendRadioState(target, new ClientboundRadioStateMessage(
                         radioId,
+                        safe(state.sessionId),
+                        Math.max(0L, state.revision),
                         safe(state.url),
                         safe(state.title),
                         safe(state.artist),
@@ -641,7 +1767,11 @@ public class SharedMediaManager {
                 continue;
             }
             for (String radioId : candidateRadioIds) {
-                RadioRuntimeStateSavedData.RadioRuntimeState state = runtimeData.get(radioId);
+                RadioRuntimeStateSavedData.RadioRuntimeState state = resolveScopedState(
+                        runtimeData,
+                        handheldRuntimeKey(radioId),
+                        radioId
+                );
                 if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
                     continue;
                 }
@@ -659,6 +1789,8 @@ public class SharedMediaManager {
                     if (!ACTIVE_HANDHELD_LISTENER_CONTEXTS.containsKey(contextKey)) {
                         ModNetworking.sendRadioState(listener, new ClientboundRadioStateMessage(
                                 radioId,
+                                safe(state.sessionId),
+                                Math.max(0L, state.revision),
                                 safe(state.url),
                                 safe(state.title),
                                 safe(state.artist),
@@ -783,9 +1915,16 @@ public class SharedMediaManager {
 
         long nowMs = System.currentTimeMillis();
         boolean changedAny = false;
+        Set<String> candidateRadioIds = new HashSet<>();
         for (Map.Entry<String, RadioRuntimeStateSavedData.RadioRuntimeState> entry : runtimeData.states().entrySet()) {
-            String radioId = safe(entry.getKey());
-            RadioRuntimeStateSavedData.RadioRuntimeState state = entry.getValue();
+            String radioId = runtimeRadioIdFromStateKey(entry.getKey());
+            if (!radioId.isBlank()) {
+                candidateRadioIds.add(radioId);
+            }
+        }
+        for (String radioId : candidateRadioIds) {
+            String runtimeKey = sessionRuntimeKey(radioId);
+            RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
             if (radioId.isBlank() || state == null || !state.playing || safe(state.url).isBlank()) {
                 continue;
             }
@@ -796,20 +1935,42 @@ public class SharedMediaManager {
                 long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
                 if (resolvedDurationMs > 0L) {
                     state.trackDurationMs = resolvedDurationMs;
+                    preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
+                    markRuntimeMutation(state, runtimeKey, nowMs);
                     changedAny = true;
+                    syncLoadedBlockEntitiesForRadioId(radioId);
                 }
             }
             if (state.trackDurationMs <= 0L) {
                 continue;
             }
             if (advanceUnownedPlaybackState(runtimeData, state, nowMs)) {
+                preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
+                markRuntimeMutation(state, runtimeKey, nowMs);
                 changedAny = true;
+                syncLoadedBlockEntitiesForRadioId(radioId);
             }
         }
 
         if (changedAny) {
             runtimeData.setDirty();
         }
+    }
+
+    private static String runtimeRadioIdFromStateKey(String key) {
+        String safeKey = safe(key);
+        if (safeKey.isBlank()) {
+            return "";
+        }
+        String blockPrefix = RUNTIME_SCOPE_BLOCK + ":";
+        if (safeKey.startsWith(blockPrefix)) {
+            return safe(safeKey.substring(blockPrefix.length()));
+        }
+        String handheldPrefix = RUNTIME_SCOPE_HANDHELD + ":";
+        if (safeKey.startsWith(handheldPrefix)) {
+            return safe(safeKey.substring(handheldPrefix.length()));
+        }
+        return safeKey;
     }
 
     private static boolean advanceUnownedPlaybackState(
@@ -827,14 +1988,14 @@ public class SharedMediaManager {
         }
 
         QueueStatePayload payload = parseQueueState(state.queueStateJson);
-        if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
-            state.playing = false;
-            state.positionMs = 0L;
-            state.trackDurationMs = -1L;
-            state.url = "";
-            state.title = "";
-            state.artist = "";
-            state.thumbnail = "";
+        if (payload == null || payload.entries == null || payload.entries.isEmpty() || payload.partial) {
+            // Contraption/runtime fallback: keep continuous playback on the current track
+            // when queue metadata is absent instead of force-stopping unexpectedly.
+            long loopedPosition = projectedPositionMs % currentDurationMs;
+            if (loopedPosition == Math.max(0L, state.positionMs)) {
+                return false;
+            }
+            state.positionMs = loopedPosition;
             state.updatedAtMs = nowMs;
             return true;
         }
@@ -950,6 +2111,19 @@ public class SharedMediaManager {
             if (payload.entries.isEmpty()) {
                 return null;
             }
+            for (QueueMediaPayload entry : payload.entries) {
+                if (entry == null) {
+                    continue;
+                }
+                entry.url = safe(entry.url);
+                entry.title = safe(entry.title);
+                entry.artist = safe(entry.artist);
+                entry.thumbnail = safe(entry.thumbnail);
+                entry.queueItemId = safe(entry.queueItemId);
+                if (entry.queueItemId.isBlank()) {
+                    entry.queueItemId = newQueueItemId();
+                }
+            }
             if (payload.loopMode == null) {
                 payload.loopMode = QueueLoopMode.ALL;
             }
@@ -966,6 +2140,25 @@ public class SharedMediaManager {
         if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
             return -1;
         }
+        String url = safe(currentUrl);
+        if (!url.isBlank()) {
+            if (payload.currentQueueItemId != null && !payload.currentQueueItemId.isBlank()) {
+                for (int i = 0; i < payload.entries.size(); i++) {
+                    QueueMediaPayload entry = payload.entries.get(i);
+                    if (entry != null
+                            && payload.currentQueueItemId.equals(safe(entry.queueItemId))
+                            && sameTrack(url, entry.url)) {
+                        return i;
+                    }
+                }
+            }
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry != null && sameTrack(url, entry.url)) {
+                    return i;
+                }
+            }
+        }
         if (payload.currentQueueItemId != null && !payload.currentQueueItemId.isBlank()) {
             for (int i = 0; i < payload.entries.size(); i++) {
                 QueueMediaPayload entry = payload.entries.get(i);
@@ -976,15 +2169,6 @@ public class SharedMediaManager {
         }
         if (payload.queueIndex >= 0 && payload.queueIndex < payload.entries.size()) {
             return payload.queueIndex;
-        }
-        String url = safe(currentUrl);
-        if (!url.isBlank()) {
-            for (int i = 0; i < payload.entries.size(); i++) {
-                QueueMediaPayload entry = payload.entries.get(i);
-                if (entry != null && sameTrack(url, entry.url)) {
-                    return i;
-                }
-            }
         }
         return 0;
     }
@@ -1050,7 +2234,115 @@ public class SharedMediaManager {
         if (safe.length() <= MAX_QUEUE_STATE_RADIO_PACKET) {
             return safe;
         }
-        return "";
+        QueueStatePayload payload = parseQueueState(safe);
+        if (payload == null) {
+            return "";
+        }
+        QueueStatePayload compact = compactQueuePayload(payload);
+        String compactJson = GSON.toJson(compact);
+        if (compactJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET) {
+            return compactJson;
+        }
+        QueueStatePayload trimmed = trimQueuePayloadForPacket(compact, MAX_QUEUE_STATE_RADIO_PACKET);
+        String trimmedJson = GSON.toJson(trimmed);
+        return trimmedJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET ? trimmedJson : "";
+    }
+
+    private static QueueStatePayload compactQueuePayload(QueueStatePayload payload) {
+        QueueStatePayload compact = new QueueStatePayload();
+        if (payload == null) {
+            return compact;
+        }
+        compact.currentQueueItemId = safe(payload.currentQueueItemId);
+        compact.queueIndex = payload.queueIndex;
+        compact.loopMode = payload.loopMode == null ? QueueLoopMode.ALL : payload.loopMode;
+        compact.partial = payload.partial;
+        if (payload.entries == null) {
+            return compact;
+        }
+        for (QueueMediaPayload entry : payload.entries) {
+            if (entry == null || safe(entry.url).isBlank()) {
+                continue;
+            }
+            QueueMediaPayload copy = new QueueMediaPayload();
+            copy.queueItemId = safe(entry.queueItemId);
+            copy.url = safe(entry.url);
+            copy.title = truncateForPacket(safe(entry.title), 256);
+            copy.artist = truncateForPacket(safe(entry.artist), 256);
+            copy.thumbnail = truncateForPacket(safe(entry.thumbnail), 1024);
+            compact.entries.add(copy);
+        }
+        return compact;
+    }
+
+    private static QueueStatePayload trimQueuePayloadForPacket(QueueStatePayload payload, int maxLength) {
+        QueueStatePayload trimmed = compactQueuePayload(payload);
+        if (trimmed.entries.isEmpty()) {
+            return trimmed;
+        }
+        String json = GSON.toJson(trimmed);
+        if (json.length() <= maxLength) {
+            return trimmed;
+        }
+        trimmed.partial = true;
+        while (json.length() > maxLength && trimmed.entries.size() > 1) {
+            trimmed.entries.remove(trimmed.entries.size() - 1);
+            alignQueuePointer(trimmed);
+            json = GSON.toJson(trimmed);
+        }
+        if (json.length() > maxLength) {
+            for (QueueMediaPayload entry : trimmed.entries) {
+                if (entry == null) {
+                    continue;
+                }
+                entry.title = "";
+                entry.artist = "";
+                entry.thumbnail = "";
+            }
+            json = GSON.toJson(trimmed);
+        }
+        while (json.length() > maxLength && trimmed.entries.size() > 1) {
+            trimmed.entries.remove(trimmed.entries.size() - 1);
+            alignQueuePointer(trimmed);
+            json = GSON.toJson(trimmed);
+        }
+        alignQueuePointer(trimmed);
+        return trimmed;
+    }
+
+    private static void alignQueuePointer(QueueStatePayload payload) {
+        if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            if (payload != null) {
+                payload.currentQueueItemId = "";
+                payload.queueIndex = -1;
+            }
+            return;
+        }
+        String currentId = safe(payload.currentQueueItemId);
+        int currentIndex = -1;
+        if (!currentId.isBlank()) {
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry != null && currentId.equals(safe(entry.queueItemId))) {
+                    currentIndex = i;
+                    break;
+                }
+            }
+        }
+        if (currentIndex < 0) {
+            currentIndex = Math.max(0, Math.min(payload.queueIndex, payload.entries.size() - 1));
+            QueueMediaPayload entry = payload.entries.get(currentIndex);
+            payload.currentQueueItemId = entry == null ? "" : safe(entry.queueItemId);
+        }
+        payload.queueIndex = currentIndex;
+    }
+
+    private static String truncateForPacket(String value, int maxLength) {
+        String safeValue = safe(value);
+        if (maxLength <= 0 || safeValue.length() <= maxLength) {
+            return safeValue;
+        }
+        return safeValue.substring(0, maxLength);
     }
 
     private static class QueueStatePayload {
@@ -1058,6 +2350,7 @@ public class SharedMediaManager {
         private String currentQueueItemId = "";
         private int queueIndex = -1;
         private QueueLoopMode loopMode = QueueLoopMode.ALL;
+        private boolean partial = false;
     }
 
     private static class QueueMediaPayload {

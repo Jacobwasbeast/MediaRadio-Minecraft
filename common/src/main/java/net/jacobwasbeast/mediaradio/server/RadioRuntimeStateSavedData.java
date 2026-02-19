@@ -10,6 +10,7 @@ import net.minecraft.world.level.saveddata.SavedData;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -17,6 +18,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
 
     private static final String DATA_NAME = "mediaradio_radio_runtime";
     private static final String TAG_RUNTIME_JSON = "RuntimeJson";
+    private static final String TAG_RUNTIME_BYTES = "RuntimeBytes";
     private static final Gson GSON = new Gson();
 
     private final Map<String, RadioRuntimeState> radioStates = new HashMap<>();
@@ -28,7 +30,13 @@ public class RadioRuntimeStateSavedData extends SavedData {
 
     public static RadioRuntimeStateSavedData load(CompoundTag tag) {
         RadioRuntimeStateSavedData data = new RadioRuntimeStateSavedData();
-        String runtimeJson = tag.getString(TAG_RUNTIME_JSON);
+        String runtimeJson;
+        if (tag.contains(TAG_RUNTIME_BYTES)) {
+            byte[] bytes = tag.getByteArray(TAG_RUNTIME_BYTES);
+            runtimeJson = bytes.length == 0 ? "" : new String(bytes, StandardCharsets.UTF_8);
+        } else {
+            runtimeJson = tag.getString(TAG_RUNTIME_JSON);
+        }
         if (runtimeJson == null || runtimeJson.isBlank()) {
             return data;
         }
@@ -54,7 +62,9 @@ public class RadioRuntimeStateSavedData extends SavedData {
     public CompoundTag save(CompoundTag tag) {
         RuntimeModel model = new RuntimeModel();
         model.states = radioStates;
-        tag.putString(TAG_RUNTIME_JSON, GSON.toJson(model));
+        String runtimeJson = GSON.toJson(model);
+        tag.putByteArray(TAG_RUNTIME_BYTES, runtimeJson.getBytes(StandardCharsets.UTF_8));
+        tag.remove(TAG_RUNTIME_JSON);
         return tag;
     }
 
@@ -120,6 +130,9 @@ public class RadioRuntimeStateSavedData extends SavedData {
     }
 
     public static class RadioRuntimeState {
+        public String sessionId = "";
+        public long revision = 0L;
+        public String ownerId = "";
         public String url = "";
         public String title = "";
         public String artist = "";
@@ -135,6 +148,9 @@ public class RadioRuntimeStateSavedData extends SavedData {
         public Map<String, Long> knownTrackDurationsMs = new HashMap<>();
 
         public void sanitize() {
+            sessionId = safe(sessionId);
+            revision = Math.max(0L, revision);
+            ownerId = safe(ownerId);
             url = safe(url);
             title = safe(title);
             artist = safe(artist);

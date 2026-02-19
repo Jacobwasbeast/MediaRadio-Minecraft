@@ -18,10 +18,11 @@ import java.util.UUID;
 public class SharedMediaSnapshot {
 
     public static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    public static final int MAX_JSON_LENGTH = 256_000;
+    public static final int MAX_JSON_LENGTH = 4_000_000;
 
     public final Map<String, MediaEntry> library = new LinkedHashMap<>();
     public final Map<String, PlaylistEntry> playlists = new LinkedHashMap<>();
+    public final List<String> deletedPlaylistIds = new ArrayList<>();
 
     public String toJson() {
         return GSON.toJson(this);
@@ -44,6 +45,18 @@ public class SharedMediaSnapshot {
         playlists.entrySet().removeIf(entry -> entry.getValue() == null);
         library.values().forEach(MediaEntry::sanitize);
         playlists.values().forEach(PlaylistEntry::sanitize);
+        if (deletedPlaylistIds != null) {
+            deletedPlaylistIds.replaceAll(SharedMediaSnapshot::safe);
+            deletedPlaylistIds.removeIf(String::isBlank);
+            List<String> deduplicated = new ArrayList<>();
+            for (String playlistId : deletedPlaylistIds) {
+                if (!deduplicated.contains(playlistId)) {
+                    deduplicated.add(playlistId);
+                }
+            }
+            deletedPlaylistIds.clear();
+            deletedPlaylistIds.addAll(deduplicated);
+        }
         return this;
     }
 

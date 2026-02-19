@@ -35,7 +35,7 @@ public class ClientAudioEngine {
     private static final double HANDHELD_EXTERNAL_MAX_DISTANCE_SQR = HANDHELD_EXTERNAL_MAX_DISTANCE * HANDHELD_EXTERNAL_MAX_DISTANCE;
     private static final float CONTRAPTION_EXTERNAL_MAX_DISTANCE = 30f;
     private static final double CONTRAPTION_EXTERNAL_MAX_DISTANCE_SQR = CONTRAPTION_EXTERNAL_MAX_DISTANCE * CONTRAPTION_EXTERNAL_MAX_DISTANCE;
-    private static final long EXTERNAL_CONTEXT_TTL_CONTRAPTION_TICKS = 40L;
+    private static final long EXTERNAL_CONTEXT_TTL_CONTRAPTION_TICKS = 200L;
     private static final long EXTERNAL_CONTEXT_TTL_HANDHELD_TICKS = 200L;
     private static final long REMOTE_PLAYING_DRIFT_CORRECTION_MS = 12_000L;
     private static final long REMOTE_PAUSED_DRIFT_CORRECTION_MS = 500L;
@@ -46,7 +46,6 @@ public class ClientAudioEngine {
 
     private final Map<BlockPos, RadioAudioChannel> blockChannels = new ConcurrentHashMap<>();
     private final Map<BlockPos, Integer> blockSeekVersions = new ConcurrentHashMap<>();
-    private final Map<BlockPos, Integer> blockEndSuppressTicks = new ConcurrentHashMap<>();
     private final Map<BlockPos, String> blockRuntimeSyncKeys = new ConcurrentHashMap<>();
     private final Map<BlockPos, Long> blockRuntimeSyncAtMs = new ConcurrentHashMap<>();
 
@@ -69,7 +68,6 @@ public class ClientAudioEngine {
             return;
         }
 
-        tickBlockEndSuppression();
         pruneStaleExternalContexts(minecraft);
         tickHandheld(minecraft);
         tickNonActiveExternalSessions(minecraft);
@@ -98,6 +96,27 @@ public class ClientAudioEngine {
             session.preferredHand = hand;
         }
         playSession(session, url, positionMs, displayTitle, artist, thumbnail);
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.PLAY_URL,
+                url,
+                displayTitle,
+                artist,
+                thumbnail,
+                Math.max(0L, positionMs),
+                session.channel == null ? -1L : session.channel.getTrackDurationMs()
+        );
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                repository.exportQueueStateJsonForRadioId(session.radioId),
+                "",
+                "",
+                "",
+                0L,
+                -1L
+        );
 
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player != null) {
@@ -133,6 +152,16 @@ public class ClientAudioEngine {
             session.intendedPlaying = true;
             session.channel.resume();
         }
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.TOGGLE_PAUSE,
+                "",
+                "",
+                "",
+                "",
+                0L,
+                -1L
+        );
 
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player != null) {
@@ -149,6 +178,16 @@ public class ClientAudioEngine {
         session.intendedPlaying = false;
         session.pausedState = false;
         session.pausedPositionMs = 0L;
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.STOP,
+                "",
+                "",
+                "",
+                "",
+                0L,
+                -1L
+        );
     }
 
     public void clearHandheldState() {
@@ -174,6 +213,16 @@ public class ClientAudioEngine {
             return;
         }
         session.volume = Mth.clamp(volume, 0f, 2f);
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.SET_VOLUME,
+                "",
+                "",
+                "",
+                "",
+                0L,
+                -1L
+        );
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player != null) {
             persistRuntimeToSession(minecraft, session);
@@ -239,6 +288,16 @@ public class ClientAudioEngine {
 
         long clamped = Math.max(0L, positionMs);
         session.seekSerial = Math.max(0, session.seekSerial + 1);
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.SEEK,
+                "",
+                "",
+                "",
+                "",
+                clamped,
+                -1L
+        );
         if (session.channel == null) {
             session.pausedPositionMs = clamped;
             Minecraft minecraft = Minecraft.getInstance();
@@ -357,6 +416,16 @@ public class ClientAudioEngine {
         if (session.channel != null && !session.title.isBlank()) {
             session.channel.setDisplayTitle(session.title);
         }
+        sendHandheldControlCommand(
+                session,
+                ServerboundRadioControlMessage.Action.UPDATE_METADATA,
+                session.url,
+                session.title,
+                session.artist,
+                session.thumbnail,
+                0L,
+                -1L
+        );
     }
 
     public void setExternalContext(String radioId, int contraptionEntityId, BlockPos localPos) {
@@ -368,7 +437,7 @@ public class ClientAudioEngine {
         if (safeRadioId.isBlank()) {
             return;
         }
-        registerExternalContext(safeRadioId, contraptionEntityId, localPos, inventoryPlayback);
+        registerExternalContext(safeRadioId, contraptionEntityId, localPos, inventoryPlayback, localPos != null);
         HandheldSession session = handheldSessions.computeIfAbsent(safeRadioId, HandheldSession::new);
         if (session != null) {
             reconfigureSessionChannelMode(session, true);
@@ -565,21 +634,64 @@ public class ClientAudioEngine {
         }
 
         boolean wasExternal = hasExternalContext(safeRadioId);
-        registerExternalContext(safeRadioId, contraptionEntityId, localPos, false);
+        registerExternalContext(safeRadioId, contraptionEntityId, localPos, false, false);
         if (!wasExternal) {
-            ModNetworking.requestRadioState(safeRadioId);
+            ModNetworking.requestRadioState(safeRadioId, net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.BLOCK);
         }
         HandheldSession session = handheldSessions.computeIfAbsent(safeRadioId, HandheldSession::new);
 
-        String stateKey = safe(url) + "|" + safe(title) + "|" + safe(artist) + "|" + safe(thumbnail) + "|"
-                + Mth.clamp(volume, 0f, 2f) + "|" + playing + "|" + contraptionEntityId + "|"
+        String resolvedUrl = safe(url);
+        String resolvedTitle = safe(title);
+        String resolvedArtist = safe(artist);
+        String resolvedThumbnail = safe(thumbnail);
+        boolean resolvedPlaying = playing;
+        long resolvedPositionMs = Math.max(0L, positionMs);
+
+        // Contraption block NBT can be stale between assembly/movement ticks.
+        // Never let stale NBT downgrade an already-playing session for the same track.
+        if (resolvedUrl.isBlank() && !session.url.isBlank()) {
+            resolvedUrl = session.url;
+        }
+        if (resolvedTitle.isBlank() && !session.title.isBlank()) {
+            resolvedTitle = session.title;
+        }
+        if (resolvedArtist.isBlank() && !session.artist.isBlank()) {
+            resolvedArtist = session.artist;
+        }
+        if (resolvedThumbnail.isBlank() && !session.thumbnail.isBlank()) {
+            resolvedThumbnail = session.thumbnail;
+        }
+        if (!resolvedUrl.isBlank()
+                && !session.url.isBlank()
+                && sameTrack(resolvedUrl, session.url)
+                && session.intendedPlaying
+                && !playing) {
+            resolvedPlaying = true;
+            if (session.channel != null) {
+                resolvedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
+            } else {
+                resolvedPositionMs = Math.max(resolvedPositionMs, Math.max(0L, session.pausedPositionMs));
+            }
+        }
+
+        String stateKey = resolvedUrl + "|" + resolvedTitle + "|" + resolvedArtist + "|" + resolvedThumbnail + "|"
+                + Mth.clamp(volume, 0f, 2f) + "|" + resolvedPlaying + "|" + contraptionEntityId + "|"
                 + (localPos == null ? "null" : localPos.toShortString()) + "|"
-                + (playing ? "moving" : Math.max(0L, positionMs) / 250L);
+                + (resolvedPlaying ? "moving" : resolvedPositionMs / 250L);
         if (stateKey.equals(session.lastExternalSyncKey)) {
             return;
         }
 
-        applyRuntimeStateToSession(session, url, title, artist, thumbnail, positionMs, volume, playing);
+        applyRuntimeStateToSession(
+                session,
+                resolvedUrl,
+                resolvedTitle,
+                resolvedArtist,
+                resolvedThumbnail,
+                resolvedPositionMs,
+                volume,
+                resolvedPlaying
+        );
         session.lastExternalSyncKey = stateKey;
     }
 
@@ -596,7 +708,6 @@ public class ClientAudioEngine {
         blockChannels.values().forEach(RadioAudioChannel::stop);
         blockChannels.clear();
         blockSeekVersions.clear();
-        blockEndSuppressTicks.clear();
         blockRuntimeSyncKeys.clear();
         blockRuntimeSyncAtMs.clear();
     }
@@ -685,6 +796,26 @@ public class ClientAudioEngine {
         }
         if (next != null && next.url != null && !next.url.isBlank()) {
             playSession(session, next.url, 0L, next.title, next.artist, next.thumbnail);
+            sendHandheldControlCommand(
+                    session,
+                    ServerboundRadioControlMessage.Action.PLAY_URL,
+                    next.url,
+                    next.title,
+                    next.artist,
+                    next.thumbnail,
+                    0L,
+                    session.channel == null ? -1L : session.channel.getTrackDurationMs()
+            );
+            sendHandheldControlCommand(
+                    session,
+                    ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                    repository.exportQueueStateJsonForRadioId(session.radioId),
+                    "",
+                    "",
+                    "",
+                    0L,
+                    -1L
+            );
         } else {
             stopSessionPlayback(session);
             session.url = "";
@@ -694,6 +825,16 @@ public class ClientAudioEngine {
             session.pausedPositionMs = 0L;
             session.pausedState = false;
             session.intendedPlaying = false;
+            sendHandheldControlCommand(
+                    session,
+                    ServerboundRadioControlMessage.Action.STOP,
+                    "",
+                    "",
+                    "",
+                    "",
+                    0L,
+                    -1L
+            );
         }
         persistRuntimeToSession(minecraft, session);
     }
@@ -755,9 +896,18 @@ public class ClientAudioEngine {
                 ended = true;
             }
             if (ended) {
+                session.pausedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
                 stopSessionPlayback(session);
-                session.intendedPlaying = false;
-                session.pausedState = false;
+                session.pausedState = session.intendedPlaying;
+                if (session.intendedPlaying && !session.url.isBlank()) {
+                    ExternalRadioContext context = externalContexts.get(radioId);
+                    ModNetworking.requestRadioState(
+                            radioId,
+                            context != null && context.localPos != null
+                                    ? net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.BLOCK
+                                    : net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.HANDHELD
+                    );
+                }
             }
             persistRuntimeToSession(minecraft, session);
         }
@@ -793,11 +943,13 @@ public class ClientAudioEngine {
             externalRadioIds.remove(radioId);
             HandheldSession session = handheldSessions.get(radioId);
             if (session != null) {
+                if (session.channel != null) {
+                    session.pausedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
+                }
                 stopSessionPlayback(session);
-                session.intendedPlaying = false;
-                session.pausedState = false;
+                session.pausedState = session.intendedPlaying;
                 session.lastExternalSyncKey = "";
-                if (minecraft.player == null || findRadioStackById(minecraft, radioId).isEmpty()) {
+                if (!session.intendedPlaying && (minecraft.player == null || findRadioStackById(minecraft, radioId).isEmpty())) {
                     handheldSessions.remove(radioId);
                 }
             }
@@ -1000,21 +1152,43 @@ public class ClientAudioEngine {
         return radioId != null && !radioId.isBlank() && externalRadioIds.contains(radioId);
     }
 
-    private void registerExternalContext(String radioId, int contraptionEntityId, BlockPos localPos, boolean inventoryPlayback) {
+    private void registerExternalContext(
+            String radioId,
+            int contraptionEntityId,
+            BlockPos localPos,
+            boolean inventoryPlayback,
+            boolean manualControl
+    ) {
         Minecraft minecraft = Minecraft.getInstance();
         long nowTick = minecraft.level == null ? 0L : minecraft.level.getGameTime();
         ExternalRadioContext existing = externalContexts.get(radioId);
         if (existing != null && existing.matches(contraptionEntityId, localPos)) {
             existing.lastSeenGameTick = nowTick;
             existing.inventoryPlayback = inventoryPlayback;
+            existing.manualControl = existing.manualControl || manualControl;
             externalRadioIds.add(radioId);
             return;
         }
 
-        ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos, inventoryPlayback);
+        ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos, inventoryPlayback, manualControl);
         context.lastSeenGameTick = nowTick;
         externalContexts.put(radioId, context);
         externalRadioIds.add(radioId);
+    }
+
+    public void primeRuntimeStateForRadio(
+            String radioId,
+            String sessionId,
+            long revision,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            long positionMs,
+            float volume,
+            boolean playing
+    ) {
+        primeRuntimeStateForRadio(radioId, sessionId, revision, url, title, artist, thumbnail, positionMs, volume, playing, 0L, false, false);
     }
 
     public void primeRuntimeStateForRadio(
@@ -1027,11 +1201,13 @@ public class ClientAudioEngine {
             float volume,
             boolean playing
     ) {
-        primeRuntimeStateForRadio(radioId, url, title, artist, thumbnail, positionMs, volume, playing, 0L, false, false);
+        primeRuntimeStateForRadio(radioId, radioId, -1L, url, title, artist, thumbnail, positionMs, volume, playing, 0L, false, false);
     }
 
     public void primeRuntimeStateForRadio(
             String radioId,
+            String sessionId,
+            long revision,
             String url,
             String title,
             String artist,
@@ -1048,6 +1224,17 @@ public class ClientAudioEngine {
             return;
         }
         HandheldSession session = handheldSessions.computeIfAbsent(safeRadioId, HandheldSession::new);
+        String safeSessionId = safe(sessionId).isBlank() ? safeRadioId : safe(sessionId);
+        if (!safeSessionId.equals(session.serverSessionId)) {
+            session.serverSessionId = safeSessionId;
+            session.lastServerRevision = -1L;
+        }
+        if (revision >= 0L) {
+            if (session.lastServerRevision > revision) {
+                return;
+            }
+            session.lastServerRevision = revision;
+        }
         if (serverSentAtMs > 0L) {
             if (session.lastServerSentAtMs > 0L && serverSentAtMs + 100L < session.lastServerSentAtMs) {
                 return;
@@ -1055,6 +1242,36 @@ public class ClientAudioEngine {
             session.lastServerSentAtMs = Math.max(session.lastServerSentAtMs, serverSentAtMs);
         }
         applyRuntimeStateToSession(session, url, title, artist, thumbnail, positionMs, volume, playing, forcePositionSync, seekEvent);
+    }
+
+    public void primeRuntimeStateForRadio(
+            String radioId,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            long positionMs,
+            float volume,
+            boolean playing,
+            long serverSentAtMs,
+            boolean forcePositionSync,
+            boolean seekEvent
+    ) {
+        primeRuntimeStateForRadio(
+                radioId,
+                radioId,
+                -1L,
+                url,
+                title,
+                artist,
+                thumbnail,
+                positionMs,
+                volume,
+                playing,
+                serverSentAtMs,
+                forcePositionSync,
+                seekEvent
+        );
     }
 
     private void applyRuntimeStateToSession(
@@ -1261,6 +1478,10 @@ public class ClientAudioEngine {
         // Only the client that actually has this radio item should upload handheld runtime.
         // Remote listeners (external context only) must never echo runtime back to server.
         if (stack.isEmpty() || !stack.is(ModItems.RADIO_ITEM)) {
+            ExternalRadioContext context = externalContexts.get(session.radioId);
+            if (context != null && context.localPos != null && context.manualControl) {
+                syncExternalRuntimeStateToServer(session, session.radioId, resolvedUrl, resolvedTitle, resolvedArtist, resolvedThumbnail, position, trackDurationMs, session.volume);
+            }
             return;
         }
 
@@ -1281,6 +1502,35 @@ public class ClientAudioEngine {
                 session.volume,
                 true
         );
+    }
+
+    private void sendHandheldControlCommand(
+            HandheldSession session,
+            ServerboundRadioControlMessage.Action action,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            long positionMs,
+            long trackDurationMs
+    ) {
+        if (session == null || session.radioId == null || session.radioId.isBlank() || action == null) {
+            return;
+        }
+        ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                null,
+                session.radioId,
+                ServerboundRadioControlMessage.Context.HANDHELD,
+                action,
+                safe(url),
+                safe(title),
+                safe(artist),
+                safe(thumbnail),
+                Mth.clamp(session.volume, 0f, 2f),
+                Math.max(0L, positionMs),
+                trackDurationMs,
+                Math.max(-1L, session.lastServerRevision)
+        ));
     }
 
     private void syncRuntimeStateToServer(
@@ -1323,9 +1573,47 @@ public class ClientAudioEngine {
                 trackDurationMs,
                 Math.max(0, session.seekSerial),
                 shouldPlay,
-                allowInventoryBroadcast
+                allowInventoryBroadcast,
+                Math.max(-1L, session.lastServerRevision)
         ));
         session.lastSyncedRuntimeKey = stateKey;
+    }
+
+    private void syncExternalRuntimeStateToServer(
+            HandheldSession session,
+            String radioId,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            long positionMs,
+            long trackDurationMs,
+            float volume
+    ) {
+        if (session == null || radioId == null || radioId.isBlank()) {
+            return;
+        }
+        long durationBucket = trackDurationMs <= 0L ? -1L : (trackDurationMs / 1_000L);
+        String stateKey = radioId + "|" + safe(url) + "|" + (Math.max(0L, positionMs) / 500L) + "|"
+                + durationBucket + "|" + Mth.clamp(volume, 0f, 2f) + "|" + session.intendedPlaying;
+        if (stateKey.equals(session.lastExternalRuntimeSyncKey)) {
+            return;
+        }
+
+        ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                null,
+                radioId,
+                ServerboundRadioControlMessage.Context.BLOCK,
+                ServerboundRadioControlMessage.Action.SYNC_RUNTIME,
+                safe(url),
+                safe(title),
+                safe(artist),
+                safe(thumbnail),
+                Mth.clamp(volume, 0f, 2f),
+                Math.max(0L, positionMs),
+                trackDurationMs
+        ));
+        session.lastExternalRuntimeSyncKey = stateKey;
     }
 
     public void invalidateHandheldRuntimeSync(String radioId) {
@@ -1531,11 +1819,6 @@ public class ClientAudioEngine {
                         continue;
                     }
 
-                    Integer suppressTicks = blockEndSuppressTicks.get(blockPos);
-                    if (suppressTicks != null && suppressTicks > 0) {
-                        continue;
-                    }
-
                     activePositions.add(blockPos);
 
                     RadioAudioChannel channel = blockChannels.computeIfAbsent(blockPos,
@@ -1573,10 +1856,17 @@ public class ClientAudioEngine {
     }
 
     private void tickBlockChannels(Minecraft minecraft) {
-        Set<BlockPos> endedNaturally = new HashSet<>();
+        if (minecraft.level == null) {
+            return;
+        }
+        Set<BlockPos> staleChannels = new HashSet<>();
         for (Map.Entry<BlockPos, RadioAudioChannel> entry : blockChannels.entrySet()) {
             BlockPos blockPos = entry.getKey();
             RadioAudioChannel channel = entry.getValue();
+            if (!(minecraft.level.getBlockEntity(blockPos) instanceof RadioBlockEntity radioBlockEntity)) {
+                staleChannels.add(blockPos);
+                continue;
+            }
             channel.tick();
             syncBlockRuntimeStateToServer(minecraft, blockPos, channel);
             boolean ended = channel.consumeNaturalEnd();
@@ -1584,110 +1874,26 @@ public class ClientAudioEngine {
                 channel.stop();
                 ended = true;
             }
-            if (ended) {
-                endedNaturally.add(blockPos);
+            if (!ended) {
+                continue;
             }
-        }
-
-        for (BlockPos blockPos : endedNaturally) {
-            handleBlockNaturalEnd(minecraft, blockPos);
-        }
-    }
-
-    private void handleBlockNaturalEnd(Minecraft minecraft, BlockPos blockPos) {
-        RadioAudioChannel channel = blockChannels.remove(blockPos);
-        if (channel != null) {
-            channel.stop();
-        }
-
-        if (minecraft.level == null) {
-            return;
-        }
-        if (!(minecraft.level.getBlockEntity(blockPos) instanceof RadioBlockEntity radioBlockEntity)) {
-            return;
-        }
-
-        ClientMediaRepository repository = ClientMediaRepository.getInstance();
-        String radioId = safe(radioBlockEntity.getRadioId());
-        String previousActiveRadioId = repository.getActiveRadioId();
-        boolean switchedContext = !radioId.isBlank() && !radioId.equals(previousActiveRadioId);
-
-        try {
-            if (!radioId.isBlank() && switchedContext) {
-                repository.setActiveRadioId(radioId);
+            if (radioBlockEntity.isPlaying() && !safe(radioBlockEntity.getMediaUrl()).isBlank()) {
+                channel.setDisplayTitle(radioBlockEntity.getMediaTitle());
+                channel.play(radioBlockEntity.getMediaUrl(), Math.max(0L, radioBlockEntity.getPlaybackPositionMs()));
+                blockSeekVersions.put(blockPos, radioBlockEntity.getSeekVersion());
+                continue;
             }
-
-            String queueStateJson = radioBlockEntity.getQueueStateJson();
-            if (!queueStateJson.isBlank()) {
-                repository.importActiveQueueStateJson(queueStateJson);
-            }
-
-            alignQueueIndexToCurrentUrl(repository, safe(radioBlockEntity.getMediaUrl()));
-            SharedMediaSnapshot.MediaEntry next = repository.nextQueueEntry();
-            if (next != null && next.url != null && !next.url.isBlank()) {
-                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                        blockPos,
-                        ServerboundRadioControlMessage.Action.PLAY_URL,
-                        next.url,
-                        safe(next.title),
-                        safe(next.artist),
-                        safe(next.thumbnail),
-                        radioBlockEntity.getVolume(),
-                        0L
-                ));
-                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                        blockPos,
-                        ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
-                        repository.exportActiveQueueStateJson(),
-                        "",
-                        "",
-                        "",
-                        radioBlockEntity.getVolume(),
-                        0L
-                ));
-                blockEndSuppressTicks.remove(blockPos);
-                return;
-            }
-        } finally {
-            if (switchedContext) {
-                repository.setActiveRadioId(previousActiveRadioId);
-            }
+            staleChannels.add(blockPos);
         }
-
-        blockEndSuppressTicks.put(blockPos, 40);
-        sendBlockStopIfPlaying(minecraft, blockPos);
-    }
-
-    private void sendBlockStopIfPlaying(Minecraft minecraft, BlockPos blockPos) {
-        if (minecraft.level == null) {
-            return;
-        }
-        if (!(minecraft.level.getBlockEntity(blockPos) instanceof RadioBlockEntity radioBlockEntity)) {
-            return;
-        }
-        if (!radioBlockEntity.isPlaying()) {
-            return;
-        }
-        ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
-                blockPos,
-                ServerboundRadioControlMessage.Action.STOP,
-                "",
-                "",
-                "",
-                "",
-                radioBlockEntity.getVolume(),
-                radioBlockEntity.getPlaybackPositionMs()
-        ));
-    }
-
-    private void tickBlockEndSuppression() {
-        blockEndSuppressTicks.forEach((blockPos, ticks) -> {
-            if (ticks == null || ticks <= 1) {
-                blockEndSuppressTicks.remove(blockPos);
-            } else {
-                blockEndSuppressTicks.put(blockPos, ticks - 1);
+        for (BlockPos blockPos : staleChannels) {
+            RadioAudioChannel channel = blockChannels.remove(blockPos);
+            if (channel != null) {
+                channel.stop();
             }
-        });
+            blockSeekVersions.remove(blockPos);
+            blockRuntimeSyncKeys.remove(blockPos);
+            blockRuntimeSyncAtMs.remove(blockPos);
+        }
     }
 
     private boolean hasExceededTrackDuration(RadioAudioChannel channel) {
@@ -1759,7 +1965,7 @@ public class ClientAudioEngine {
             return;
         }
         SharedMediaSnapshot.MediaEntry current = repository.getCurrentQueueEntry();
-        if (current != null && current.url != null && currentUrl.equals(current.url)) {
+        if (current != null && current.url != null && sameTrack(currentUrl, current.url)) {
             return;
         }
         var queueEntries = repository.getQueueEntries();
@@ -1769,11 +1975,17 @@ public class ClientAudioEngine {
             if (entry == null || entry.url == null) {
                 continue;
             }
-            if (currentUrl.equals(entry.url)) {
-                if (matchedIndex != -1) {
-                    // Ambiguous URL (duplicate entries) - preserve existing queue pointer.
-                    return;
-                }
+            if (!sameTrack(currentUrl, entry.url)) {
+                continue;
+            }
+            if (matchedIndex < 0) {
+                matchedIndex = i;
+                continue;
+            }
+            int baseline = Math.max(0, repository.getQueueIndex());
+            int currentDistance = Math.abs(matchedIndex - baseline);
+            int candidateDistance = Math.abs(i - baseline);
+            if (candidateDistance < currentDistance) {
                 matchedIndex = i;
             }
         }
@@ -1800,6 +2012,9 @@ public class ClientAudioEngine {
         private boolean intendedPlaying;
         private String lastSyncedRuntimeKey = "";
         private String lastExternalSyncKey = "";
+        private String lastExternalRuntimeSyncKey = "";
+        private String serverSessionId = "";
+        private long lastServerRevision = -1L;
         private long lastRemoteSeekAtMs;
         private long lastServerSentAtMs;
         private int seekSerial;
@@ -1813,15 +2028,17 @@ public class ClientAudioEngine {
         private final int contraptionEntityId;
         private final BlockPos localPos;
         private volatile boolean inventoryPlayback;
+        private volatile boolean manualControl;
         private volatile Vec3 lastKnownPos = Vec3.ZERO;
         private volatile Vec3 smoothedPos;
         private volatile long lastSmoothNanos;
         private volatile long lastSeenGameTick;
 
-        private ExternalRadioContext(int contraptionEntityId, BlockPos localPos, boolean inventoryPlayback) {
+        private ExternalRadioContext(int contraptionEntityId, BlockPos localPos, boolean inventoryPlayback, boolean manualControl) {
             this.contraptionEntityId = contraptionEntityId;
             this.localPos = localPos;
             this.inventoryPlayback = inventoryPlayback;
+            this.manualControl = manualControl;
         }
 
         private boolean matches(int entityId, BlockPos blockPos) {

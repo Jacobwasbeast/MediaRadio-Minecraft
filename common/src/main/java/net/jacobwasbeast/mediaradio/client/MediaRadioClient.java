@@ -47,7 +47,7 @@ public class MediaRadioClient {
         Balm.getEvents().onEvent(net.blay09.mods.balm.api.event.client.DisconnectedFromServerEvent.class,
                 event -> {
                     ClientAudioEngine.getInstance().stopAll();
-                    ClientMediaRepository.getInstance().reset();
+                    ClientMediaRepository.getInstance().resetAndReloadCache();
                 });
     }
 
@@ -60,7 +60,7 @@ public class MediaRadioClient {
                 ClientMediaRepository repository = ClientMediaRepository.getInstance();
                 repository.setActiveRadioId(radioId);
                 ClientAudioEngine.getInstance().setHandheldContext(radioId, hand);
-                ModNetworking.requestRadioState(radioId);
+                ModNetworking.requestRadioState(radioId, net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.HANDHELD);
             }
         }
         minecraft.setScreen(RadioScreen.forHand(hand));
@@ -77,12 +77,14 @@ public class MediaRadioClient {
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
         repository.setActiveRadioId(radioId);
         ClientAudioEngine.getInstance().setExternalContext(radioId, contraptionEntityId, localPos);
-        ModNetworking.requestRadioState(radioId);
+        ModNetworking.requestRadioState(radioId, net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.BLOCK);
         Minecraft.getInstance().setScreen(RadioScreen.forContraptionRadio(radioId, contraptionEntityId, localPos));
     }
 
     public static void applyServerRadioRuntimeState(
             String radioId,
+            String sessionId,
+            long revision,
             String url,
             String title,
             String artist,
@@ -132,29 +134,12 @@ public class MediaRadioClient {
                 mediaId = existing.id;
             }
 
-            List<SharedMediaSnapshot.MediaEntry> queue = isActiveRadio ? repository.getQueueEntries() : List.of();
-            if (queue.isEmpty()) {
-                if (isActiveRadio) {
-                    repository.enqueue(mediaId);
-                    repository.setQueueIndex(0);
-                }
-            } else if (!hasAuthoritativeQueueState && isActiveRadio) {
-                int matchingIndex = -1;
-                for (int i = 0; i < queue.size(); i++) {
-                    SharedMediaSnapshot.MediaEntry queued = queue.get(i);
-                    if (queued != null && resolvedUrl.equals(queued.url)) {
-                        matchingIndex = i;
-                        break;
-                    }
-                }
-                if (matchingIndex >= 0) {
-                    repository.setQueueIndex(matchingIndex);
-                } else {
+            if (isActiveRadio) {
+                int reconciledIndex = repository.reconcileCurrentQueueEntryForRadioId(radioId, resolvedUrl);
+                if (reconciledIndex < 0 && !hasAuthoritativeQueueState) {
                     repository.enqueue(mediaId);
                     repository.setQueueIndex(Math.max(0, repository.getQueueEntries().size() - 1));
                 }
-            } else if (isActiveRadio && repository.getCurrentQueueEntry() == null) {
-                repository.setQueueIndex(0);
             }
         }
 
@@ -168,6 +153,8 @@ public class MediaRadioClient {
 
         audioEngine.primeRuntimeStateForRadio(
                 radioId,
+                sessionId,
+                revision,
                 resolvedUrl,
                 resolvedTitle,
                 resolvedArtist,
@@ -196,8 +183,32 @@ public class MediaRadioClient {
         boolean wasExternal = audioEngine.hasExternalContext(radioId);
         audioEngine.setExternalContext(radioId, entityId, null, inventoryPlayback);
         if (!wasExternal) {
-            ModNetworking.requestRadioState(radioId);
+            ModNetworking.requestRadioState(radioId, net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.HANDHELD);
         }
+    }
+
+    public static void handleServerSessionCommandResult(
+            String radioId,
+            String sessionId,
+            long serverRevision,
+            boolean accepted,
+            net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage.Reason reason,
+            net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context context
+    ) {
+        if (accepted) {
+            return;
+        }
+        if (reason != net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage.Reason.STALE_REVISION
+                && reason != net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage.Reason.UNAUTHORIZED) {
+            return;
+        }
+        if (radioId == null || radioId.isBlank()) {
+            return;
+        }
+        ModNetworking.requestRadioState(
+                radioId,
+                context == null ? net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.HANDHELD : context
+        );
     }
 
     private static void registerItemPredicates() {

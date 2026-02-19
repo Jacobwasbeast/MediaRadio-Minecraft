@@ -4,6 +4,8 @@ import net.minecraft.network.FriendlyByteBuf;
 
 public record ClientboundRadioStateMessage(
         String radioId,
+        String sessionId,
+        long revision,
         String url,
         String title,
         String artist,
@@ -19,10 +21,13 @@ public record ClientboundRadioStateMessage(
     private static final int MAX_PACKET_STRING = 262144;
     private static final int MAX_TITLE_ARTIST = 4096;
     private static final int MAX_RADIO_ID = 256;
+    private static final int MAX_SESSION_ID = 256;
 
     public ClientboundRadioStateMessage(FriendlyByteBuf friendlyByteBuf) {
         this(
                 friendlyByteBuf.readUtf(MAX_RADIO_ID),
+                friendlyByteBuf.readUtf(MAX_SESSION_ID),
+                friendlyByteBuf.readLong(),
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
                 friendlyByteBuf.readUtf(MAX_TITLE_ARTIST),
                 friendlyByteBuf.readUtf(MAX_TITLE_ARTIST),
@@ -39,6 +44,8 @@ public record ClientboundRadioStateMessage(
 
     public void encode(FriendlyByteBuf friendlyByteBuf) {
         friendlyByteBuf.writeUtf(radioId == null ? "" : radioId, MAX_RADIO_ID);
+        friendlyByteBuf.writeUtf(sessionId == null ? "" : sessionId, MAX_SESSION_ID);
+        friendlyByteBuf.writeLong(Math.max(0L, revision));
         friendlyByteBuf.writeUtf(url == null ? "" : url, MAX_PACKET_STRING);
         friendlyByteBuf.writeUtf(title == null ? "" : title, MAX_TITLE_ARTIST);
         friendlyByteBuf.writeUtf(artist == null ? "" : artist, MAX_TITLE_ARTIST);

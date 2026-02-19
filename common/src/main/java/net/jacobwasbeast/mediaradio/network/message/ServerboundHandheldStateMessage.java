@@ -14,7 +14,9 @@ public record ServerboundHandheldStateMessage(
         long trackDurationMs,
         int seekSerial,
         boolean playing,
-        boolean allowInventoryBroadcast
+        boolean allowInventoryBroadcast,
+        long knownRevision,
+        long commandId
 ) {
     private static final int MAX_PACKET_STRING = 262144;
     private static final int MAX_TITLE_ARTIST = 4096;
@@ -33,7 +35,42 @@ public record ServerboundHandheldStateMessage(
                 friendlyByteBuf.readLong(),
                 friendlyByteBuf.readVarInt(),
                 friendlyByteBuf.readBoolean(),
-                friendlyByteBuf.readBoolean()
+                friendlyByteBuf.readBoolean(),
+                friendlyByteBuf.readLong(),
+                friendlyByteBuf.readLong()
+        );
+    }
+
+    public ServerboundHandheldStateMessage(
+            String radioId,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            String queueStateJson,
+            float volume,
+            long positionMs,
+            long trackDurationMs,
+            int seekSerial,
+            boolean playing,
+            boolean allowInventoryBroadcast,
+            long knownRevision
+    ) {
+        this(
+                radioId,
+                url,
+                title,
+                artist,
+                thumbnail,
+                queueStateJson,
+                volume,
+                positionMs,
+                trackDurationMs,
+                seekSerial,
+                playing,
+                allowInventoryBroadcast,
+                knownRevision,
+                -1L
         );
     }
 
@@ -50,5 +87,7 @@ public record ServerboundHandheldStateMessage(
         friendlyByteBuf.writeVarInt(Math.max(0, seekSerial));
         friendlyByteBuf.writeBoolean(playing);
         friendlyByteBuf.writeBoolean(allowInventoryBroadcast);
+        friendlyByteBuf.writeLong(knownRevision);
+        friendlyByteBuf.writeLong(commandId);
     }
 }

@@ -3,6 +3,7 @@ package net.jacobwasbeast.mediaradio.network;
 import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.network.BalmNetworking;
 import net.jacobwasbeast.mediaradio.MediaRadio;
+import net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaChunkMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundPlayerRadioContextMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
@@ -19,11 +20,14 @@ import net.minecraft.server.level.ServerPlayer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 public class ModNetworking {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ModNetworking.class);
     private static final int SHARED_MEDIA_DIRECT_THRESHOLD = 10_000;
     private static final int SHARED_MEDIA_CHUNK_SIZE = 8_000;
+    private static final AtomicLong COMMAND_SEQUENCE = new AtomicLong();
 
     public static void initialize(BalmNetworking networking) {
         networking.registerClientboundPacket(
@@ -59,6 +63,8 @@ public class ModNetworking {
                                         "applyServerRadioRuntimeState",
                                         String.class,
                                         String.class,
+                                        long.class,
+                                        String.class,
                                         String.class,
                                         String.class,
                                         String.class,
@@ -73,6 +79,8 @@ public class ModNetworking {
                                 .invoke(
                                         null,
                                         message.radioId(),
+                                        message.sessionId(),
+                                        message.revision(),
                                         message.url(),
                                         message.title(),
                                         message.artist(),
@@ -144,6 +152,41 @@ public class ModNetworking {
                                 .invoke(null, message.radioId(), message.contraptionEntityId(), message.localPos());
                     } catch (Exception exception) {
                         LOGGER.error("Failed to open contraption radio screen on client", exception);
+                    }
+                }
+        );
+
+        networking.registerClientboundPacket(
+                MediaRadio.id("session_command_result"),
+                ClientboundSessionCommandResultMessage.class,
+                ClientboundSessionCommandResultMessage::encode,
+                ClientboundSessionCommandResultMessage::new,
+                (player, message) -> {
+                    if (!Balm.getProxy().isClient()) {
+                        return;
+                    }
+                    try {
+                        Class<?> clientClass = Class.forName("net.jacobwasbeast.mediaradio.client.MediaRadioClient");
+                        clientClass.getMethod(
+                                        "handleServerSessionCommandResult",
+                                        String.class,
+                                        String.class,
+                                        long.class,
+                                        boolean.class,
+                                        ClientboundSessionCommandResultMessage.Reason.class,
+                                        net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.class
+                                )
+                                .invoke(
+                                        null,
+                                        message.radioId(),
+                                        message.sessionId(),
+                                        message.serverRevision(),
+                                        message.accepted(),
+                                        message.reason(),
+                                        message.context()
+                                );
+                    } catch (Exception exception) {
+                        LOGGER.error("Failed to process session command result on client", exception);
                     }
                 }
         );
@@ -262,18 +305,72 @@ public class ModNetworking {
     }
 
     public static void sendBlockRadioControl(ServerboundRadioControlMessage message) {
-        Balm.getNetworking().sendToServer(message);
+        if (message == null) {
+            return;
+        }
+        ServerboundRadioControlMessage outbound = message;
+        if (outbound.commandId() < 0L) {
+            outbound = new ServerboundRadioControlMessage(
+                    outbound.blockPos(),
+                    outbound.radioId(),
+                    outbound.context(),
+                    outbound.action(),
+                    outbound.url(),
+                    outbound.title(),
+                    outbound.artist(),
+                    outbound.thumbnail(),
+                    outbound.volume(),
+                    outbound.positionMs(),
+                    outbound.trackDurationMs(),
+                    outbound.knownRevision(),
+                    nextCommandId()
+            );
+        }
+        Balm.getNetworking().sendToServer(outbound);
     }
 
     public static void sendHandheldState(ServerboundHandheldStateMessage message) {
-        Balm.getNetworking().sendToServer(message);
+        if (message == null) {
+            return;
+        }
+        ServerboundHandheldStateMessage outbound = message;
+        if (outbound.commandId() < 0L) {
+            outbound = new ServerboundHandheldStateMessage(
+                    outbound.radioId(),
+                    outbound.url(),
+                    outbound.title(),
+                    outbound.artist(),
+                    outbound.thumbnail(),
+                    outbound.queueStateJson(),
+                    outbound.volume(),
+                    outbound.positionMs(),
+                    outbound.trackDurationMs(),
+                    outbound.seekSerial(),
+                    outbound.playing(),
+                    outbound.allowInventoryBroadcast(),
+                    outbound.knownRevision(),
+                    nextCommandId()
+            );
+        }
+        Balm.getNetworking().sendToServer(outbound);
     }
 
     public static void requestRadioState(String radioId) {
-        Balm.getNetworking().sendToServer(new ServerboundRequestRadioStateMessage(radioId));
+        requestRadioState(radioId, ServerboundRequestRadioStateMessage.Context.HANDHELD);
+    }
+
+    public static void requestRadioState(String radioId, ServerboundRequestRadioStateMessage.Context context) {
+        Balm.getNetworking().sendToServer(new ServerboundRequestRadioStateMessage(radioId, context));
     }
 
     public static void sendRadioState(ServerPlayer player, ClientboundRadioStateMessage message) {
+        Balm.getNetworking().sendTo(player, message);
+    }
+
+    public static void sendSessionCommandResult(ServerPlayer player, ClientboundSessionCommandResultMessage message) {
+        if (player == null || message == null) {
+            return;
+        }
         Balm.getNetworking().sendTo(player, message);
     }
 
@@ -287,5 +384,14 @@ public class ModNetworking {
 
     private static int chunkCount(int totalLength, int chunkSize) {
         return Math.max(1, (totalLength + chunkSize - 1) / chunkSize);
+    }
+
+    private static long nextCommandId() {
+        long next = COMMAND_SEQUENCE.incrementAndGet();
+        if (next <= 0L) {
+            COMMAND_SEQUENCE.set(1L);
+            return 1L;
+        }
+        return next;
     }
 }

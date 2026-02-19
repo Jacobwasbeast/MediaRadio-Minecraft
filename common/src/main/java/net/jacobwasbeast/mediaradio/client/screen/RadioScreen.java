@@ -10,6 +10,7 @@ import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
 import net.jacobwasbeast.mediaradio.item.RadioItem;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
 import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
 import net.minecraft.client.Minecraft;
@@ -257,6 +258,7 @@ public class RadioScreen extends Screen {
     @Override
     public void onClose() {
         persistRuntimeState();
+        ClientMediaRepository.getInstance().uploadSnapshotNow();
         super.onClose();
     }
 
@@ -1503,13 +1505,19 @@ public class RadioScreen extends Screen {
         if (selectedPlaylistId.isBlank()) {
             return;
         }
-        List<SharedMediaSnapshot.MediaEntry> tracks = ClientMediaRepository.getInstance().getPlaylistMedia(selectedPlaylistId);
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        List<SharedMediaSnapshot.MediaEntry> tracks = repository.getPlaylistMedia(selectedPlaylistId);
         if (tracks.isEmpty()) {
             return;
         }
-        ClientMediaRepository.getInstance().setQueueFromPlaylist(selectedPlaylistId);
-        selectedQueueIndex = ClientMediaRepository.getInstance().getQueueIndex();
-        playEntry(tracks.get(0), false);
+        repository.setQueueFromPlaylist(selectedPlaylistId);
+        SharedMediaSnapshot.MediaEntry entry = repository.setQueueIndex(0);
+        selectedQueueIndex = Math.max(0, repository.getQueueIndex());
+        if (entry == null && !tracks.isEmpty()) {
+            entry = tracks.get(0);
+        }
+        broadcastQueueStateNow();
+        playEntry(entry, false);
     }
 
     private void playSelectedPlaylistTrack() {
@@ -1764,6 +1772,21 @@ public class RadioScreen extends Screen {
         boolean removedCurrentQueueItem = selectedQueueIndex == currentQueueIndex;
         boolean removedCurrentlyPlayingUrl = isRemovedEntryCurrentlyPlaying(removedEntry);
 
+        if (removedCurrentQueueItem || removedCurrentlyPlayingUrl) {
+            // Stop first so runtime cannot reinsert the removed now-playing track from stale state.
+            stopPlayback();
+            repository.removeQueueIndex(selectedQueueIndex);
+            int queueSize = repository.getQueueEntries().size();
+            if (queueSize == 0) {
+                selectedQueueIndex = -1;
+            } else {
+                selectedQueueIndex = Math.min(selectedQueueIndex, queueSize - 1);
+            }
+            broadcastQueueStateNow();
+            persistRuntimeState();
+            return;
+        }
+
         repository.removeQueueIndex(selectedQueueIndex);
         int queueSize = repository.getQueueEntries().size();
         if (queueSize == 0) {
@@ -1772,11 +1795,7 @@ public class RadioScreen extends Screen {
             selectedQueueIndex = Math.min(selectedQueueIndex, queueSize - 1);
         }
 
-        if (removedCurrentQueueItem || removedCurrentlyPlayingUrl) {
-            stopPlayback();
-        } else {
-            persistRuntimeState();
-        }
+        persistRuntimeState();
     }
 
     private boolean isRemovedEntryCurrentlyPlaying(SharedMediaSnapshot.MediaEntry removedEntry) {
@@ -1866,6 +1885,28 @@ public class RadioScreen extends Screen {
                 repository.setQueueIndex(selectedQueueIndex);
                 return;
             }
+        }
+        int currentQueueIndex = Math.max(0, repository.getQueueIndex());
+        int matchedIndex = -1;
+        for (int i = 0; i < queue.size(); i++) {
+            SharedMediaSnapshot.MediaEntry queuedEntry = queue.get(i);
+            if (queuedEntry == null || !entry.id.equals(queuedEntry.id)) {
+                continue;
+            }
+            if (matchedIndex < 0) {
+                matchedIndex = i;
+                continue;
+            }
+            int existingDistance = Math.abs(matchedIndex - currentQueueIndex);
+            int candidateDistance = Math.abs(i - currentQueueIndex);
+            if (candidateDistance < existingDistance) {
+                matchedIndex = i;
+            }
+        }
+        if (matchedIndex >= 0) {
+            repository.setQueueIndex(matchedIndex);
+            selectedQueueIndex = matchedIndex;
+            return;
         }
         repository.enqueue(entry.id);
         int newIndex = Math.max(0, repository.getQueueEntries().size() - 1);
@@ -2128,9 +2169,44 @@ public class RadioScreen extends Screen {
         PlaybackView playbackView;
         if (isBlockMode()) {
             String boundRadioId = getTargetBlockRadioId();
+            RadioBlockEntity blockEntity = getBlockEntity();
+            // For placed block screens, always prefer the block entity state. Runtime sessions are keyed
+            // only by radio id and can represent another live context when multiple same-id endpoints exist.
+            if (blockEntity != null) {
+                SharedMediaSnapshot.MediaEntry queueCurrent = boundRadioId == null || boundRadioId.isBlank()
+                        ? ClientMediaRepository.getInstance().getCurrentQueueEntry()
+                        : ClientMediaRepository.getInstance().getCurrentQueueEntryForRadioId(boundRadioId);
+                String title = blockEntity.getMediaTitle();
+                if (title == null || title.isBlank()) {
+                    title = blockEntity.getMediaUrl().isBlank() ? "Nothing queued" : blockEntity.getMediaUrl();
+                }
+                PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
+                        blockEntity.getMediaUrl(),
+                        title,
+                        blockEntity.getMediaArtist(),
+                        blockEntity.getMediaThumbnail(),
+                        queueCurrent
+                );
+                String state = blockEntity.getMediaUrl().isBlank() ? "Stopped" : (blockEntity.isPlaying() ? "Playing" : "Paused");
+                long channelPositionMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockPlaybackPositionMs(blockPos);
+                long channelDurationMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos);
+                long positionMs = channelPositionMs >= 0L ? channelPositionMs : blockEntity.getPlaybackPositionMs();
+                playbackView = new PlaybackView(
+                        state,
+                        displayInfo.title(),
+                        displayInfo.artist(),
+                        displayInfo.thumbnail(),
+                        positionMs,
+                        channelDurationMs,
+                        blockEntity.getVolume()
+                );
+                return finalizePlaybackView(playbackView);
+            }
+
+            // Contraption/no-BE fallback uses shared runtime.
             if (boundRadioId != null && !boundRadioId.isBlank()) {
                 ClientAudioEngine.HandheldRenderState runtime = ClientAudioEngine.getInstance().getRenderStateForRadioId(boundRadioId);
-                SharedMediaSnapshot.MediaEntry queueCurrent = ClientMediaRepository.getInstance().getCurrentQueueEntry();
+                SharedMediaSnapshot.MediaEntry queueCurrent = ClientMediaRepository.getInstance().getCurrentQueueEntryForRadioId(boundRadioId);
                 if (runtime != null) {
                     PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
                             runtime.url(),
@@ -2164,36 +2240,7 @@ public class RadioScreen extends Screen {
                 }
             }
 
-            RadioBlockEntity blockEntity = getBlockEntity();
-            if (blockEntity == null) {
-                playbackView = new PlaybackView("Stopped", "No radio data", "", "", 0L, -1L, blockVolume);
-                return finalizePlaybackView(playbackView);
-            }
-
-            String title = blockEntity.getMediaTitle();
-            if (title == null || title.isBlank()) {
-                title = blockEntity.getMediaUrl().isBlank() ? "Nothing queued" : blockEntity.getMediaUrl();
-            }
-            PlaybackDisplayResolver.DisplayInfo displayInfo = PlaybackDisplayResolver.resolve(
-                    blockEntity.getMediaUrl(),
-                    title,
-                    blockEntity.getMediaArtist(),
-                    blockEntity.getMediaThumbnail(),
-                    ClientMediaRepository.getInstance().getCurrentQueueEntry()
-            );
-            String state = blockEntity.getMediaUrl().isBlank() ? "Stopped" : (blockEntity.isPlaying() ? "Playing" : "Paused");
-            long channelPositionMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockPlaybackPositionMs(blockPos);
-            long channelDurationMs = blockPos == null ? -1L : ClientAudioEngine.getInstance().getBlockTrackDurationMs(blockPos);
-            long positionMs = channelPositionMs >= 0L ? channelPositionMs : blockEntity.getPlaybackPositionMs();
-            playbackView = new PlaybackView(
-                    state,
-                    displayInfo.title(),
-                    displayInfo.artist(),
-                    displayInfo.thumbnail(),
-                    positionMs,
-                    channelDurationMs,
-                    blockEntity.getVolume()
-            );
+            playbackView = new PlaybackView("Stopped", "No radio data", "", "", 0L, -1L, blockVolume);
             return finalizePlaybackView(playbackView);
         }
 
@@ -2582,7 +2629,7 @@ public class RadioScreen extends Screen {
             if (!fixedBlockRadioId.equals(lastBoundBlockRadioId)) {
                 lastPersistedQueueState = "";
                 lastBoundBlockRadioId = fixedBlockRadioId;
-                ModNetworking.requestRadioState(fixedBlockRadioId);
+                ModNetworking.requestRadioState(fixedBlockRadioId, ServerboundRequestRadioStateMessage.Context.BLOCK);
             }
             return;
         }
@@ -2599,12 +2646,45 @@ public class RadioScreen extends Screen {
         if (!radioId.equals(repository.getActiveRadioId())) {
             repository.setActiveRadioId(radioId);
         }
+        String queueState = blockEntity.getQueueStateJson();
         if (!radioId.equals(lastBoundBlockRadioId)) {
-            String queueState = blockEntity.getQueueStateJson();
             repository.importActiveQueueStateJson(queueState);
             lastPersistedQueueState = queueState;
             lastBoundBlockRadioId = radioId;
+            return;
         }
+        // Keep UI queue model aligned when server simulation advances this radio while no player owns it.
+        if (!queueState.equals(lastPersistedQueueState)) {
+            repository.importActiveQueueStateJson(queueState);
+            lastPersistedQueueState = queueState;
+        }
+    }
+
+    private void broadcastQueueStateNow() {
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String queueStateJson = repository.exportActiveQueueStateJson();
+        if (isBlockMode()) {
+            sendBlockRadioControl(ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE, queueStateJson, "", "", "", 0L);
+            lastPersistedQueueState = queueStateJson;
+            return;
+        }
+
+        String radioId = repository.getActiveRadioId();
+        if (radioId == null || radioId.isBlank()) {
+            return;
+        }
+        ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                null,
+                radioId,
+                ServerboundRadioControlMessage.Context.HANDHELD,
+                ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                queueStateJson,
+                "",
+                "",
+                "",
+                getVolume(),
+                0L
+        ));
     }
 
     private String blockContextKey() {
@@ -2655,6 +2735,27 @@ public class RadioScreen extends Screen {
                 blockVolume,
                 positionMs
         ));
+
+        if (action == ServerboundRadioControlMessage.Action.PLAY_URL) {
+            String radioId = getTargetBlockRadioId();
+            String queueStateJson = radioId == null || radioId.isBlank()
+                    ? ClientMediaRepository.getInstance().exportActiveQueueStateJson()
+                    : ClientMediaRepository.getInstance().exportQueueStateJsonForRadioId(radioId);
+            if (!queueStateJson.isBlank()) {
+                ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
+                        blockPos,
+                        radioId == null ? "" : radioId,
+                        ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                        queueStateJson,
+                        "",
+                        "",
+                        "",
+                        blockVolume,
+                        0L
+                ));
+                lastPersistedQueueState = queueStateJson;
+            }
+        }
 
         if (fixedBlockRadioId.isBlank()) {
             return;

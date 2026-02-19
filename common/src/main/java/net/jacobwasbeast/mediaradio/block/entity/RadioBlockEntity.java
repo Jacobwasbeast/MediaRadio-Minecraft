@@ -11,6 +11,13 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.jacobwasbeast.mediaradio.registry.ModBlockEntities;
 import net.jacobwasbeast.mediaradio.server.SharedMediaManager;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 public class RadioBlockEntity extends BlockEntity {
 
     public static final String TAG_MEDIA_URL = "MediaUrl";
@@ -39,6 +46,8 @@ public class RadioBlockEntity extends BlockEntity {
     private float volume = 1.0f;
     private String queueStateJson = "";
     private boolean pendingRuntimeStateApply;
+    private boolean runtimeRegistryRegistered;
+    private static final Map<String, Set<RadioBlockEntity>> LOADED_BY_RADIO_ID = new HashMap<>();
 
     public RadioBlockEntity(BlockPos blockPos, BlockState blockState) {
         super(ModBlockEntities.RADIO_BLOCK_ENTITY.get(), blockPos, blockState);
@@ -53,7 +62,13 @@ public class RadioBlockEntity extends BlockEntity {
     }
 
     public void setRadioId(String radioId) {
-        this.radioId = safe(radioId);
+        String resolved = safe(radioId);
+        if (resolved.equals(this.radioId)) {
+            return;
+        }
+        String previous = this.radioId;
+        this.radioId = resolved;
+        updateRegistryForRadioIdChange(previous, this.radioId);
         sync();
     }
 
@@ -223,6 +238,7 @@ public class RadioBlockEntity extends BlockEntity {
     }
 
     private void serverTick() {
+        ensureRegisteredInRuntimeRegistry();
         if (!pendingRuntimeStateApply || level == null || level.isClientSide) {
             return;
         }
@@ -232,6 +248,13 @@ public class RadioBlockEntity extends BlockEntity {
 
     public void handleUpdateTag(CompoundTag tag) {
         load(tag);
+    }
+
+    @Override
+    public void setRemoved() {
+        unregisterLoadedEntity();
+        runtimeRegistryRegistered = false;
+        super.setRemoved();
     }
 
     @Override
@@ -245,5 +268,79 @@ public class RadioBlockEntity extends BlockEntity {
 
     private static float clamp(float value, float min, float max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private void registerLoadedEntity() {
+        if (level == null || level.isClientSide) {
+            return;
+        }
+        String id = safe(radioId);
+        if (id.isBlank()) {
+            return;
+        }
+        synchronized (LOADED_BY_RADIO_ID) {
+            LOADED_BY_RADIO_ID.computeIfAbsent(id, ignored -> new HashSet<>()).add(this);
+        }
+    }
+
+    private void unregisterLoadedEntity() {
+        synchronized (LOADED_BY_RADIO_ID) {
+            LOADED_BY_RADIO_ID.values().forEach(set -> set.remove(this));
+            LOADED_BY_RADIO_ID.entrySet().removeIf(entry -> entry.getValue() == null || entry.getValue().isEmpty());
+        }
+    }
+
+    private void updateRegistryForRadioIdChange(String previousRadioId, String nextRadioId) {
+        if (level == null || level.isClientSide) {
+            return;
+        }
+        String previous = safe(previousRadioId);
+        String next = safe(nextRadioId);
+        if (previous.equals(next)) {
+            return;
+        }
+        synchronized (LOADED_BY_RADIO_ID) {
+            if (!previous.isBlank()) {
+                Set<RadioBlockEntity> previousSet = LOADED_BY_RADIO_ID.get(previous);
+                if (previousSet != null) {
+                    previousSet.remove(this);
+                    if (previousSet.isEmpty()) {
+                        LOADED_BY_RADIO_ID.remove(previous);
+                    }
+                }
+            }
+            if (!next.isBlank()) {
+                LOADED_BY_RADIO_ID.computeIfAbsent(next, ignored -> new HashSet<>()).add(this);
+            }
+        }
+    }
+
+    public static List<RadioBlockEntity> loadedForRadioId(String radioId) {
+        String resolved = safe(radioId);
+        if (resolved.isBlank()) {
+            return List.of();
+        }
+        synchronized (LOADED_BY_RADIO_ID) {
+            Set<RadioBlockEntity> set = LOADED_BY_RADIO_ID.get(resolved);
+            if (set == null || set.isEmpty()) {
+                return List.of();
+            }
+            List<RadioBlockEntity> snapshot = new ArrayList<>();
+            for (RadioBlockEntity entity : set) {
+                if (entity == null || entity.isRemoved() || entity.level == null || entity.level.isClientSide) {
+                    continue;
+                }
+                snapshot.add(entity);
+            }
+            return snapshot;
+        }
+    }
+
+    private void ensureRegisteredInRuntimeRegistry() {
+        if (runtimeRegistryRegistered) {
+            return;
+        }
+        registerLoadedEntity();
+        runtimeRegistryRegistered = true;
     }
 }

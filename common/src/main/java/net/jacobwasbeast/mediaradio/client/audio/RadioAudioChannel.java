@@ -49,6 +49,9 @@ import static org.lwjgl.openal.AL11.AL_LINEAR_DISTANCE;
 
 public class RadioAudioChannel {
     private static boolean distanceModelConfigured;
+    private static final long STALL_RECOVERY_STARTUP_GRACE_MS = 4_000L;
+    private static final long STALL_RECOVERY_THRESHOLD_MS = 6_500L;
+    private static final long STALL_RECOVERY_COOLDOWN_MS = 10_000L;
 
     private static final ExecutorService DECODE_EXECUTOR = Executors.newCachedThreadPool(new ThreadFactory() {
         private int counter;
@@ -83,6 +86,10 @@ public class RadioAudioChannel {
     private volatile long pausedPositionMs = -1L;
     private volatile long trackDurationMs = -1L;
     private volatile com.sedmelluq.discord.lavaplayer.track.AudioTrack activeLavaTrack;
+    private volatile long playbackStartedAtMs;
+    private volatile long lastPlaybackProgressAtMs;
+    private volatile long stallDetectedAtMs;
+    private volatile long lastRecoveryAttemptAtMs;
 
     private volatile CompletableFuture<?> decodeTask;
 
@@ -146,6 +153,9 @@ public class RadioAudioChannel {
         stopping = false;
         decoderEnded = false;
         endedNaturally = false;
+        playbackStartedAtMs = System.currentTimeMillis();
+        lastPlaybackProgressAtMs = playbackStartedAtMs;
+        stallDetectedAtMs = 0L;
         pcmQueue.clear();
         queuedBuffers.clear();
         long generation = decodeGeneration.incrementAndGet();
@@ -233,6 +243,10 @@ public class RadioAudioChannel {
         pausedPositionMs = -1L;
         trackDurationMs = -1L;
         activeLavaTrack = null;
+        playbackStartedAtMs = 0L;
+        lastPlaybackProgressAtMs = 0L;
+        stallDetectedAtMs = 0L;
+        lastRecoveryAttemptAtMs = 0L;
         endedNaturally = naturalEnd;
     }
 
@@ -264,6 +278,10 @@ public class RadioAudioChannel {
             alSourcePlay(sourceId);
             sourceState = alGetSourcei(sourceId, AL_SOURCE_STATE);
         }
+        if (sourceState == AL_PLAYING || !queuedBuffers.isEmpty() || !pcmQueue.isEmpty()) {
+            lastPlaybackProgressAtMs = System.currentTimeMillis();
+            stallDetectedAtMs = 0L;
+        }
 
         // On some OpenAL backends, EOF can leave queued buffers lingering in STOPPED state.
         // Force-drain when decode has ended so natural-end can always be emitted.
@@ -274,6 +292,53 @@ public class RadioAudioChannel {
 
         if (decoderEnded && pcmQueue.isEmpty() && queuedBuffers.isEmpty() && sourceState != AL_PLAYING) {
             stopInternal(true);
+            return;
+        }
+        attemptStallRecovery(sourceState);
+    }
+
+    private void attemptStallRecovery(int sourceState) {
+        if (paused || stopping || currentUrl.isBlank()) {
+            stallDetectedAtMs = 0L;
+            return;
+        }
+        if (decoderEnded) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (playbackStartedAtMs > 0L && now - playbackStartedAtMs < STALL_RECOVERY_STARTUP_GRACE_MS) {
+            return;
+        }
+        if (lastPlaybackProgressAtMs > 0L && now - lastPlaybackProgressAtMs < STALL_RECOVERY_THRESHOLD_MS) {
+            return;
+        }
+        if (sourceState == AL_PLAYING || !queuedBuffers.isEmpty() || !pcmQueue.isEmpty()) {
+            stallDetectedAtMs = 0L;
+            return;
+        }
+        if (stallDetectedAtMs <= 0L) {
+            stallDetectedAtMs = now;
+            return;
+        }
+        if (now - stallDetectedAtMs < STALL_RECOVERY_THRESHOLD_MS) {
+            return;
+        }
+        if (now - lastRecoveryAttemptAtMs < STALL_RECOVERY_COOLDOWN_MS) {
+            return;
+        }
+
+        String resumeUrl = currentUrl;
+        if (resumeUrl.isBlank()) {
+            return;
+        }
+        long resumePositionMs = getEstimatedPositionMs();
+        String resumeTitle = displayTitle;
+        lastRecoveryAttemptAtMs = now;
+        MediaRadio.LOGGER.warn("Recovering stalled audio channel for {}", resumeUrl);
+        play(resumeUrl, resumePositionMs);
+        if (!resumeTitle.isBlank()) {
+            setDisplayTitle(resumeTitle);
         }
     }
 

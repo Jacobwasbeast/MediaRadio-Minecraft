@@ -107,9 +107,6 @@ public final class CreateCompat {
             }
 
             String mediaUrl = safe(nbt, RadioBlockEntity.TAG_MEDIA_URL);
-            if (mediaUrl.isBlank()) {
-                return;
-            }
 
             String mediaTitle = safe(nbt, RadioBlockEntity.TAG_MEDIA_TITLE);
             String mediaArtist = safe(nbt, RadioBlockEntity.TAG_MEDIA_ARTIST);

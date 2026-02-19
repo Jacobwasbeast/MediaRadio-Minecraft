@@ -5,10 +5,13 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.saveddata.SavedData;
 
+import java.nio.charset.StandardCharsets;
+
 public class SharedMediaSavedData extends SavedData {
 
     private static final String DATA_NAME = "mediaradio_shared_media";
     private static final String TAG_SNAPSHOT_JSON = "SnapshotJson";
+    private static final String TAG_SNAPSHOT_BYTES = "SnapshotBytes";
 
     private String snapshotJson = new SharedMediaSnapshot().toJson();
 
@@ -19,7 +22,12 @@ public class SharedMediaSavedData extends SavedData {
 
     public static SharedMediaSavedData load(CompoundTag tag) {
         SharedMediaSavedData data = new SharedMediaSavedData();
-        data.snapshotJson = tag.getString(TAG_SNAPSHOT_JSON);
+        if (tag.contains(TAG_SNAPSHOT_BYTES)) {
+            byte[] bytes = tag.getByteArray(TAG_SNAPSHOT_BYTES);
+            data.snapshotJson = bytes.length == 0 ? "" : new String(bytes, StandardCharsets.UTF_8);
+        } else {
+            data.snapshotJson = tag.getString(TAG_SNAPSHOT_JSON);
+        }
         if (data.snapshotJson.isBlank()) {
             data.snapshotJson = new SharedMediaSnapshot().toJson();
         }
@@ -28,7 +36,9 @@ public class SharedMediaSavedData extends SavedData {
 
     @Override
     public CompoundTag save(CompoundTag compoundTag) {
-        compoundTag.putString(TAG_SNAPSHOT_JSON, snapshotJson);
+        String json = snapshotJson == null ? "" : snapshotJson;
+        compoundTag.putByteArray(TAG_SNAPSHOT_BYTES, json.getBytes(StandardCharsets.UTF_8));
+        compoundTag.remove(TAG_SNAPSHOT_JSON);
         return compoundTag;
     }
 
