@@ -70,6 +70,7 @@ public class ClientAudioEngine {
 
         pruneStaleExternalContexts(minecraft);
         tickHandheld(minecraft);
+        releaseInactiveLocalChannels(minecraft);
         tickNonActiveExternalSessions(minecraft);
 
         blockScanTicker++;
@@ -379,12 +380,14 @@ public class ClientAudioEngine {
 
         if (!safeRadioId.equals(activeHandheldRadioId)) {
             HandheldSession previous = activeSession();
-            if (previous != null && previous.channel != null && previous.channel.isPlaying()) {
+            if (previous != null && previous.channel != null) {
                 previous.pausedPositionMs = previous.channel.getEstimatedPositionMs();
-                previous.pausedState = true;
-                // Keep intent so it resumes when switching back to that radio.
-                previous.intendedPlaying = true;
-                previous.channel.pause();
+                previous.pausedState = !previous.url.isBlank();
+                // Keep resume intent for sessions that were actively playing.
+                if (previous.channel.isPlaying()) {
+                    previous.intendedPlaying = true;
+                }
+                stopSessionPlayback(previous);
             }
         }
 
@@ -758,6 +761,16 @@ public class ClientAudioEngine {
             return;
         }
 
+        if (!shouldKeepSessionChannelActive(minecraft, session)) {
+            if (session.channel != null) {
+                session.pausedPositionMs = session.channel.getEstimatedPositionMs();
+                stopSessionPlayback(session);
+            }
+            session.pausedState = !session.url.isBlank();
+            persistRuntimeToSession(minecraft, session);
+            return;
+        }
+
         if (session.channel == null) {
             if (session.intendedPlaying && !session.url.isBlank()) {
                 resumeSessionIfHeld(minecraft, session);
@@ -889,7 +902,24 @@ public class ClientAudioEngine {
                 continue;
             }
             HandheldSession session = handheldSessions.get(radioId);
-            if (session == null || session.channel == null) {
+            if (session == null) {
+                continue;
+            }
+            if (!shouldKeepSessionChannelActive(minecraft, session)) {
+                if (session.channel != null) {
+                    session.pausedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
+                    stopSessionPlayback(session);
+                }
+                session.pausedState = !session.url.isBlank();
+                persistRuntimeToSession(minecraft, session);
+                continue;
+            }
+            if (session.channel == null) {
+                if (session.intendedPlaying && !session.url.isBlank()) {
+                    resumeSessionIfHeld(minecraft, session);
+                }
+            }
+            if (session.channel == null) {
                 continue;
             }
             session.channel.tick();
@@ -912,6 +942,26 @@ public class ClientAudioEngine {
                     );
                 }
             }
+            persistRuntimeToSession(minecraft, session);
+        }
+    }
+
+    private void releaseInactiveLocalChannels(Minecraft minecraft) {
+        for (Map.Entry<String, HandheldSession> entry : handheldSessions.entrySet()) {
+            String radioId = entry.getKey();
+            if (radioId == null || radioId.isBlank()) {
+                continue;
+            }
+            if (radioId.equals(activeHandheldRadioId) || isExternalSession(radioId)) {
+                continue;
+            }
+            HandheldSession session = entry.getValue();
+            if (session == null || session.channel == null) {
+                continue;
+            }
+            session.pausedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
+            stopSessionPlayback(session);
+            session.pausedState = !session.url.isBlank();
             persistRuntimeToSession(minecraft, session);
         }
     }
@@ -1315,8 +1365,8 @@ public class ClientAudioEngine {
         session.intendedPlaying = playing;
 
         boolean shouldBePositional = shouldUsePositionalChannel(Minecraft.getInstance(), session);
-        if (session.channel == null && shouldBePositional && playing && !session.url.isBlank()) {
-            session.channel = createSessionChannel(session, true);
+        if (session.channel == null && playing && !session.url.isBlank()) {
+            session.channel = createSessionChannel(session, shouldBePositional);
             session.channel.setDisplayTitle(session.title);
             session.channel.play(session.url, session.pausedPositionMs);
             return;
@@ -1392,6 +1442,26 @@ public class ClientAudioEngine {
         }
         // Local radios should remain listener-relative even if another endpoint shares the same session id.
         return findRadioStackById(minecraft, session.radioId).isEmpty();
+    }
+
+    private boolean shouldKeepSessionChannelActive(Minecraft minecraft, HandheldSession session) {
+        if (session == null || safe(session.url).isBlank()) {
+            return false;
+        }
+        boolean activeSession = session.radioId != null && session.radioId.equals(activeHandheldRadioId);
+        if (!session.intendedPlaying) {
+            // Only keep paused channels for the active local handheld session.
+            return activeSession && !isExternalSession(session.radioId);
+        }
+        if (!isExternalSession(session.radioId)) {
+            return activeSession;
+        }
+        if (minecraft == null || minecraft.level == null || minecraft.player == null) {
+            return false;
+        }
+        // Remote contexts that are currently inaudible should not keep decoding/holding
+        // audio sources; they can be recreated instantly when they become audible again.
+        return resolveExternalSessionVolume(session, session.radioId) > 0.0001f;
     }
 
     private Vec3 resolveExternalSourcePosition(String radioId) {

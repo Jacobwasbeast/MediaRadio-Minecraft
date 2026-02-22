@@ -573,6 +573,13 @@ public class SharedMediaManager {
                 : handheldRuntimeKey(radioId);
         RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
         ensureSessionIdentity(state, runtimeKey);
+        long nowMs = System.currentTimeMillis();
+        if (normalizeRuntimeStateForAccess(runtimeData, state, nowMs, true)) {
+            preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
+            markRuntimeMutation(state, runtimeKey, nowMs);
+            runtimeData.setDirty();
+            syncLoadedBlockEntitiesForRadioId(radioId);
+        }
         long position = runtimeData.currentPositionMs(state);
         ModNetworking.sendRadioState(player, new ClientboundRadioStateMessage(
                 radioId,
@@ -613,7 +620,7 @@ public class SharedMediaManager {
         );
         ensureSessionIdentity(state, runtimeKey);
         long nowMs = System.currentTimeMillis();
-        boolean changed = false;
+        boolean changed = normalizeRuntimeStateForAccess(runtimeData, state, nowMs, true);
         String blockOwnerId = safe(radioBlockEntity.getOwnerId());
         String runtimeOwnerId = safe(state.ownerId);
         if (runtimeOwnerId.isBlank()) {
@@ -624,21 +631,6 @@ public class SharedMediaManager {
             }
         } else if (blockOwnerId.isBlank()) {
             radioBlockEntity.setOwnerId(runtimeOwnerId);
-        }
-        if (state.playing && !safe(state.url).isBlank()) {
-            if (state.trackDurationMs <= 0L) {
-                long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
-                if (resolvedDurationMs > 0L) {
-                    state.trackDurationMs = resolvedDurationMs;
-                    changed = true;
-                }
-            }
-            long projectedPositionMs = runtimeData.currentPositionMs(state);
-            if (state.trackDurationMs > 0L && projectedPositionMs + TRACK_END_EPSILON_MS >= state.trackDurationMs) {
-                if (advanceUnownedPlaybackState(runtimeData, state, nowMs)) {
-                    changed = true;
-                }
-            }
         }
         if (changed) {
             preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
@@ -1002,6 +994,50 @@ public class SharedMediaManager {
         }
         state.positionMs = runtimeData.currentPositionMs(state);
         state.updatedAtMs = Math.max(0L, nowMs);
+    }
+
+    private static boolean normalizeRuntimeStateForAccess(
+            RadioRuntimeStateSavedData runtimeData,
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            long nowMs,
+            boolean allowAdvance
+    ) {
+        if (runtimeData == null || state == null) {
+            return false;
+        }
+        boolean changed = false;
+
+        if (state.trackDurationMs <= 0L && !safe(state.url).isBlank()) {
+            long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
+            if (resolvedDurationMs > 0L) {
+                state.trackDurationMs = resolvedDurationMs;
+                changed = true;
+            }
+        }
+
+        if (!state.playing && state.trackDurationMs > 0L) {
+            long clampedPausedPosition = Math.min(Math.max(0L, state.positionMs), state.trackDurationMs);
+            if (clampedPausedPosition != Math.max(0L, state.positionMs)) {
+                state.positionMs = clampedPausedPosition;
+                changed = true;
+            }
+        }
+
+        if (alignQueueStateToCurrentTrack(state)) {
+            changed = true;
+        }
+
+        if (allowAdvance
+                && state.playing
+                && !safe(state.url).isBlank()
+                && state.trackDurationMs > 0L
+                && runtimeData.currentPositionMs(state) + TRACK_END_EPSILON_MS >= state.trackDurationMs) {
+            if (advanceUnownedPlaybackState(runtimeData, state, nowMs)) {
+                changed = true;
+            }
+        }
+
+        return changed;
     }
 
     private static String mergeIncomingQueueState(String existingQueueStateJson, String incomingQueueStateJson) {
@@ -1933,26 +1969,41 @@ public class SharedMediaManager {
         for (String radioId : candidateRadioIds) {
             String runtimeKey = sessionRuntimeKey(radioId);
             RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
-            if (radioId.isBlank() || state == null || !state.playing || safe(state.url).isBlank()) {
+            if (radioId.isBlank() || state == null) {
                 continue;
             }
-            if (nowMs - Math.max(0L, state.updatedAtMs) < UNOWNED_RUNTIME_STALE_MS) {
-                continue;
-            }
-            if (state.trackDurationMs <= 0L) {
-                long resolvedDurationMs = resolveTrackDurationMs(state, state.url);
-                if (resolvedDurationMs > 0L) {
-                    state.trackDurationMs = resolvedDurationMs;
+
+            boolean stateChanged = normalizeRuntimeStateForAccess(runtimeData, state, nowMs, false);
+
+            if (!state.playing || safe(state.url).isBlank()) {
+                if (stateChanged) {
                     preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
                     markRuntimeMutation(state, runtimeKey, nowMs);
                     changedAny = true;
                     syncLoadedBlockEntitiesForRadioId(radioId);
                 }
-            }
-            if (state.trackDurationMs <= 0L) {
                 continue;
             }
-            if (advanceUnownedPlaybackState(runtimeData, state, nowMs)) {
+            if (nowMs - Math.max(0L, state.updatedAtMs) < UNOWNED_RUNTIME_STALE_MS) {
+                if (stateChanged) {
+                    preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
+                    markRuntimeMutation(state, runtimeKey, nowMs);
+                    changedAny = true;
+                    syncLoadedBlockEntitiesForRadioId(radioId);
+                }
+                continue;
+            }
+            stateChanged = normalizeRuntimeStateForAccess(runtimeData, state, nowMs, true) || stateChanged;
+            if (state.trackDurationMs <= 0L) {
+                if (stateChanged) {
+                    preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
+                    markRuntimeMutation(state, runtimeKey, nowMs);
+                    changedAny = true;
+                    syncLoadedBlockEntitiesForRadioId(radioId);
+                }
+                continue;
+            }
+            if (stateChanged) {
                 preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
                 markRuntimeMutation(state, runtimeKey, nowMs);
                 changedAny = true;
@@ -2008,6 +2059,7 @@ public class SharedMediaManager {
             return true;
         }
 
+        alignQueuePointer(payload);
         int currentIndex = resolveCurrentQueueIndex(payload, state.url);
         if (currentIndex < 0 || currentIndex >= payload.entries.size()) {
             return false;
@@ -2024,15 +2076,36 @@ public class SharedMediaManager {
             return true;
         }
 
+        if (payload.loopMode == QueueLoopMode.ALL) {
+            long cycleDurationMs = resolveQueueCycleDurationMs(state, payload);
+            if (cycleDurationMs > 0L && remainingMs >= cycleDurationMs) {
+                remainingMs %= cycleDurationMs;
+            }
+        } else if (payload.loopMode == QueueLoopMode.NONE) {
+            long remainingToQueueEndMs = resolveQueueTailDurationMs(state, payload, currentIndex);
+            if (remainingToQueueEndMs > 0L && remainingMs >= remainingToQueueEndMs) {
+                return stopRuntimePlaybackAtQueueEnd(state, payload, payload.entries.size() - 1, nowMs);
+            }
+        }
+
         boolean changed = false;
         int transitions = 0;
         while (state.playing && transitions++ < MAX_SIMULATED_TRANSITIONS_PER_TICK) {
             QueueMediaPayload currentEntry = payload.entries.get(currentIndex);
+            if (!sameTrack(state.url, currentEntry.url)) {
+                state.url = safe(currentEntry.url);
+                state.title = safe(currentEntry.title);
+                state.artist = safe(currentEntry.artist);
+                state.thumbnail = safe(currentEntry.thumbnail);
+                state.trackDurationMs = resolveTrackDurationMs(state, state.url);
+                changed = true;
+            }
             long durationMs = resolveTrackDurationMs(state, currentEntry.url);
             if (durationMs <= 0L) {
                 break;
             }
-            if (remainingMs + TRACK_END_EPSILON_MS < durationMs) {
+            // Avoid transitioning early while waiting for exact runtime crossover.
+            if (remainingMs < durationMs) {
                 break;
             }
             remainingMs = Math.max(0L, remainingMs - durationMs);
@@ -2047,18 +2120,7 @@ public class SharedMediaManager {
                 if (payload.loopMode == QueueLoopMode.ALL) {
                     nextIndex = 0;
                 } else {
-                    payload.currentQueueItemId = safe(currentEntry.queueItemId);
-                    payload.queueIndex = currentIndex;
-                    state.queueStateJson = GSON.toJson(payload);
-                    state.playing = false;
-                    state.positionMs = 0L;
-                    state.trackDurationMs = -1L;
-                    state.url = "";
-                    state.title = "";
-                    state.artist = "";
-                    state.thumbnail = "";
-                    state.updatedAtMs = nowMs;
-                    return true;
+                    return stopRuntimePlaybackAtQueueEnd(state, payload, currentIndex, nowMs);
                 }
             }
 
@@ -2086,6 +2148,76 @@ public class SharedMediaManager {
             state.trackDurationMs = resolveTrackDurationMs(state, state.url);
         }
         return true;
+    }
+
+    private static boolean stopRuntimePlaybackAtQueueEnd(
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            QueueStatePayload payload,
+            int currentIndex,
+            long nowMs
+    ) {
+        if (state == null || payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            return false;
+        }
+        int safeIndex = Math.max(0, Math.min(currentIndex, payload.entries.size() - 1));
+        QueueMediaPayload currentEntry = payload.entries.get(safeIndex);
+        payload.currentQueueItemId = safe(currentEntry == null ? "" : currentEntry.queueItemId);
+        payload.queueIndex = safeIndex;
+        state.queueStateJson = GSON.toJson(payload);
+        state.playing = false;
+        state.positionMs = 0L;
+        state.trackDurationMs = -1L;
+        state.url = "";
+        state.title = "";
+        state.artist = "";
+        state.thumbnail = "";
+        state.updatedAtMs = nowMs;
+        return true;
+    }
+
+    private static long resolveQueueCycleDurationMs(
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            QueueStatePayload payload
+    ) {
+        if (state == null || payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            return -1L;
+        }
+        long total = 0L;
+        for (QueueMediaPayload entry : payload.entries) {
+            long durationMs = resolveTrackDurationMs(state, entry == null ? "" : entry.url);
+            if (durationMs <= 0L) {
+                return -1L;
+            }
+            if (Long.MAX_VALUE - total < durationMs) {
+                return Long.MAX_VALUE;
+            }
+            total += durationMs;
+        }
+        return total <= 0L ? -1L : total;
+    }
+
+    private static long resolveQueueTailDurationMs(
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            QueueStatePayload payload,
+            int startIndex
+    ) {
+        if (state == null || payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            return -1L;
+        }
+        int index = Math.max(0, Math.min(startIndex, payload.entries.size() - 1));
+        long total = 0L;
+        for (int i = index; i < payload.entries.size(); i++) {
+            QueueMediaPayload entry = payload.entries.get(i);
+            long durationMs = resolveTrackDurationMs(state, entry == null ? "" : entry.url);
+            if (durationMs <= 0L) {
+                return -1L;
+            }
+            if (Long.MAX_VALUE - total < durationMs) {
+                return Long.MAX_VALUE;
+            }
+            total += durationMs;
+        }
+        return total <= 0L ? -1L : total;
     }
 
     private static long resolveTrackDurationMs(RadioRuntimeStateSavedData.RadioRuntimeState state, String url) {
@@ -2148,35 +2280,41 @@ public class SharedMediaManager {
         if (payload == null || payload.entries == null || payload.entries.isEmpty()) {
             return -1;
         }
-        String url = safe(currentUrl);
-        if (!url.isBlank()) {
-            if (payload.currentQueueItemId != null && !payload.currentQueueItemId.isBlank()) {
-                for (int i = 0; i < payload.entries.size(); i++) {
-                    QueueMediaPayload entry = payload.entries.get(i);
-                    if (entry != null
-                            && payload.currentQueueItemId.equals(safe(entry.queueItemId))
-                            && sameTrack(url, entry.url)) {
-                        return i;
-                    }
-                }
-            }
+        String currentPointerId = safe(payload.currentQueueItemId);
+        if (!currentPointerId.isBlank()) {
             for (int i = 0; i < payload.entries.size(); i++) {
                 QueueMediaPayload entry = payload.entries.get(i);
-                if (entry != null && sameTrack(url, entry.url)) {
-                    return i;
-                }
-            }
-        }
-        if (payload.currentQueueItemId != null && !payload.currentQueueItemId.isBlank()) {
-            for (int i = 0; i < payload.entries.size(); i++) {
-                QueueMediaPayload entry = payload.entries.get(i);
-                if (entry != null && payload.currentQueueItemId.equals(safe(entry.queueItemId))) {
+                if (entry != null && currentPointerId.equals(safe(entry.queueItemId))) {
                     return i;
                 }
             }
         }
         if (payload.queueIndex >= 0 && payload.queueIndex < payload.entries.size()) {
             return payload.queueIndex;
+        }
+
+        String url = safe(currentUrl);
+        if (!url.isBlank()) {
+            int baseline = 0;
+            int matchedIndex = -1;
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry == null || !sameTrack(url, entry.url)) {
+                    continue;
+                }
+                if (matchedIndex < 0) {
+                    matchedIndex = i;
+                    continue;
+                }
+                int currentDistance = Math.abs(matchedIndex - baseline);
+                int candidateDistance = Math.abs(i - baseline);
+                if (candidateDistance < currentDistance) {
+                    matchedIndex = i;
+                }
+            }
+            if (matchedIndex >= 0) {
+                return matchedIndex;
+            }
         }
         return 0;
     }
@@ -2340,6 +2478,9 @@ public class SharedMediaManager {
         if (currentIndex < 0) {
             currentIndex = Math.max(0, Math.min(payload.queueIndex, payload.entries.size() - 1));
             QueueMediaPayload entry = payload.entries.get(currentIndex);
+            if (entry != null && safe(entry.queueItemId).isBlank()) {
+                entry.queueItemId = newQueueItemId();
+            }
             payload.currentQueueItemId = entry == null ? "" : safe(entry.queueItemId);
         }
         payload.queueIndex = currentIndex;

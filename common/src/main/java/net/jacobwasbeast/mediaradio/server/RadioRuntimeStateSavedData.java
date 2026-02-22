@@ -91,6 +91,9 @@ public class RadioRuntimeStateSavedData extends SavedData {
         }
         long now = System.currentTimeMillis();
         long delta = Math.max(0L, now - Math.max(0L, state.updatedAtMs));
+        if (Long.MAX_VALUE - base < delta) {
+            return Long.MAX_VALUE;
+        }
         return base + delta;
     }
 
@@ -121,6 +124,9 @@ public class RadioRuntimeStateSavedData extends SavedData {
             state.knownTrackDurationsMs.put(trackKey(state.url), state.trackDurationMs);
         } else if (state.trackDurationMs <= 0L && !state.url.isBlank()) {
             state.trackDurationMs = state.knownTrackDurationsMs.getOrDefault(trackKey(state.url), -1L);
+        }
+        if (!playing && state.trackDurationMs > 0L) {
+            state.positionMs = Math.min(state.positionMs, state.trackDurationMs);
         }
         state.seekSerial = Math.max(0, seekSerial);
         state.playing = playing;
@@ -177,6 +183,9 @@ public class RadioRuntimeStateSavedData extends SavedData {
                 knownTrackDurationsMs.put(trackKey(url), trackDurationMs);
             } else if (trackDurationMs <= 0L && !url.isBlank()) {
                 trackDurationMs = knownTrackDurationsMs.getOrDefault(trackKey(url), -1L);
+            }
+            if (!playing && trackDurationMs > 0L) {
+                positionMs = Math.min(positionMs, trackDurationMs);
             }
         }
     }
