@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2
+
+- Fixed client playback channel/session lifecycle issues that could cause new radios to produce no audio while older sessions continued playing.
+- Fixed inactive radio sessions holding audio resources, improving stability with many simultaneous radios and track transitions.
+- Fixed long-stale runtime playback normalization edge cases that could leave radios stuck between queue items with invalid oversized time states.
+
 ## 1.3.1
 
 - Fixed client audio session recovery so playback does not require a client restart after stalled/new-session failures.
