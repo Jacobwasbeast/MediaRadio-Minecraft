@@ -38,7 +38,6 @@ public class SharedMediaManager {
     private static final int UNOWNED_RUNTIME_SIMULATION_INTERVAL_TICKS = 20;
     private static final long UNOWNED_RUNTIME_STALE_MS = 3_000L;
     private static final long TRACK_END_EPSILON_MS = 250L;
-    private static final int MAX_SIMULATED_TRANSITIONS_PER_TICK = 128;
     private static final double HANDHELD_LISTENER_SYNC_RANGE_SQR = 96.0D * 96.0D;
     private static final double BLOCK_CONTROL_MAX_DISTANCE_SQR = 24.0D * 24.0D;
     private static final String RUNTIME_SCOPE_HANDHELD = "handheld";
@@ -2065,8 +2064,9 @@ public class SharedMediaManager {
             return false;
         }
 
+        QueueLoopMode loopMode = payload.loopMode == null ? QueueLoopMode.ALL : payload.loopMode;
         long remainingMs = projectedPositionMs;
-        if (payload.loopMode == QueueLoopMode.ONE && currentDurationMs > 0L) {
+        if (loopMode == QueueLoopMode.ONE && currentDurationMs > 0L) {
             long loopedPosition = remainingMs % currentDurationMs;
             if (loopedPosition == Math.max(0L, state.positionMs)) {
                 return false;
@@ -2076,48 +2076,58 @@ public class SharedMediaManager {
             return true;
         }
 
-        if (payload.loopMode == QueueLoopMode.ALL) {
+        boolean completeDurationCoverage = true;
+        if (loopMode == QueueLoopMode.ALL) {
             long cycleDurationMs = resolveQueueCycleDurationMs(state, payload);
             if (cycleDurationMs > 0L && remainingMs >= cycleDurationMs) {
                 remainingMs %= cycleDurationMs;
+            } else if (cycleDurationMs <= 0L) {
+                completeDurationCoverage = false;
             }
-        } else if (payload.loopMode == QueueLoopMode.NONE) {
+        } else if (loopMode == QueueLoopMode.NONE) {
             long remainingToQueueEndMs = resolveQueueTailDurationMs(state, payload, currentIndex);
             if (remainingToQueueEndMs > 0L && remainingMs >= remainingToQueueEndMs) {
                 return stopRuntimePlaybackAtQueueEnd(state, payload, payload.entries.size() - 1, nowMs);
+            } else if (remainingToQueueEndMs <= 0L) {
+                completeDurationCoverage = false;
             }
         }
 
         boolean changed = false;
-        int transitions = 0;
-        while (state.playing && transitions++ < MAX_SIMULATED_TRANSITIONS_PER_TICK) {
+        changed = applyQueueEntryToRuntimeState(state, payload, currentIndex) || changed;
+        int maxTransitions = Math.max(1, payload.entries.size() + 1);
+        for (int transitions = 0; transitions < maxTransitions; transitions++) {
             QueueMediaPayload currentEntry = payload.entries.get(currentIndex);
-            if (!sameTrack(state.url, currentEntry.url)) {
-                state.url = safe(currentEntry.url);
-                state.title = safe(currentEntry.title);
-                state.artist = safe(currentEntry.artist);
-                state.thumbnail = safe(currentEntry.thumbnail);
-                state.trackDurationMs = resolveTrackDurationMs(state, state.url);
-                changed = true;
-            }
             long durationMs = resolveTrackDurationMs(state, currentEntry.url);
             if (durationMs <= 0L) {
-                break;
+                // We cannot deterministically traverse past a track with unknown duration.
+                // Land at this track start to avoid persisting runaway elapsed positions.
+                long boundedPosition = 0L;
+                if (!changed && boundedPosition == Math.max(0L, state.positionMs)) {
+                    return false;
+                }
+                state.positionMs = boundedPosition;
+                state.updatedAtMs = nowMs;
+                state.queueStateJson = GSON.toJson(payload);
+                state.trackDurationMs = -1L;
+                return true;
             }
-            // Avoid transitioning early while waiting for exact runtime crossover.
             if (remainingMs < durationMs) {
-                break;
+                long clampedPosition = Math.max(0L, remainingMs);
+                if (!changed && clampedPosition == Math.max(0L, state.positionMs)) {
+                    return false;
+                }
+                state.positionMs = clampedPosition;
+                state.updatedAtMs = nowMs;
+                state.queueStateJson = GSON.toJson(payload);
+                state.trackDurationMs = durationMs;
+                return true;
             }
             remainingMs = Math.max(0L, remainingMs - durationMs);
 
-            if (payload.loopMode == QueueLoopMode.ONE) {
-                changed = true;
-                continue;
-            }
-
             int nextIndex = currentIndex + 1;
             if (nextIndex >= payload.entries.size()) {
-                if (payload.loopMode == QueueLoopMode.ALL) {
+                if (loopMode == QueueLoopMode.ALL) {
                     nextIndex = 0;
                 } else {
                     return stopRuntimePlaybackAtQueueEnd(state, payload, currentIndex, nowMs);
@@ -2125,29 +2135,82 @@ public class SharedMediaManager {
             }
 
             currentIndex = nextIndex;
-            QueueMediaPayload nextEntry = payload.entries.get(currentIndex);
-            payload.currentQueueItemId = safe(nextEntry.queueItemId);
-            payload.queueIndex = currentIndex;
-            state.url = safe(nextEntry.url);
-            state.title = safe(nextEntry.title);
-            state.artist = safe(nextEntry.artist);
-            state.thumbnail = safe(nextEntry.thumbnail);
-            state.trackDurationMs = resolveTrackDurationMs(state, state.url);
+            changed = applyQueueEntryToRuntimeState(state, payload, currentIndex) || changed;
+
+            if (!completeDurationCoverage && transitions >= payload.entries.size() - 1) {
+                break;
+            }
+        }
+
+        long fallbackPosition = Math.max(0L, state.positionMs);
+        if (!changed && fallbackPosition == Math.max(0L, state.positionMs)) {
+            return false;
+        }
+        state.positionMs = fallbackPosition;
+        state.updatedAtMs = nowMs;
+        state.queueStateJson = GSON.toJson(payload);
+        return true;
+    }
+
+    private static boolean applyQueueEntryToRuntimeState(
+            RadioRuntimeStateSavedData.RadioRuntimeState state,
+            QueueStatePayload payload,
+            int queueIndex
+    ) {
+        if (state == null || payload == null || payload.entries == null || payload.entries.isEmpty()) {
+            return false;
+        }
+        int safeIndex = Math.max(0, Math.min(queueIndex, payload.entries.size() - 1));
+        QueueMediaPayload entry = payload.entries.get(safeIndex);
+        if (entry == null) {
+            return false;
+        }
+        boolean changed = false;
+        String pointerId = safe(entry.queueItemId);
+        if (!pointerId.equals(safe(payload.currentQueueItemId))) {
+            payload.currentQueueItemId = pointerId;
+            changed = true;
+        }
+        if (payload.queueIndex != safeIndex) {
+            payload.queueIndex = safeIndex;
             changed = true;
         }
 
-        long clampedPosition = Math.max(0L, remainingMs);
-        if (!changed && clampedPosition == Math.max(0L, state.positionMs)) {
-            return false;
+        String entryUrl = safe(entry.url);
+        boolean trackChanged = !sameTrack(state.url, entryUrl);
+        if (trackChanged) {
+            state.url = entryUrl;
+            changed = true;
         }
 
-        state.positionMs = clampedPosition;
-        state.updatedAtMs = nowMs;
-        state.queueStateJson = GSON.toJson(payload);
-        if (state.trackDurationMs <= 0L && !state.url.isBlank()) {
-            state.trackDurationMs = resolveTrackDurationMs(state, state.url);
+        String title = safe(entry.title);
+        if (!title.isBlank() && !safe(state.title).equals(title)) {
+            state.title = title;
+            changed = true;
         }
-        return true;
+        String artist = safe(entry.artist);
+        if (!artist.isBlank() && !safe(state.artist).equals(artist)) {
+            state.artist = artist;
+            changed = true;
+        }
+        String thumbnail = safe(entry.thumbnail);
+        if (!thumbnail.isBlank() && !safe(state.thumbnail).equals(thumbnail)) {
+            state.thumbnail = thumbnail;
+            changed = true;
+        }
+
+        long resolvedDurationMs = resolveTrackDurationMs(state, entryUrl);
+        if (resolvedDurationMs > 0L) {
+            if (state.trackDurationMs != resolvedDurationMs) {
+                state.trackDurationMs = resolvedDurationMs;
+                changed = true;
+            }
+        } else if (trackChanged && state.trackDurationMs != -1L) {
+            state.trackDurationMs = -1L;
+            changed = true;
+        }
+
+        return changed;
     }
 
     private static boolean stopRuntimePlaybackAtQueueEnd(

@@ -7,6 +7,8 @@ import org.lwjgl.BufferUtils;
 import javax.sound.sampled.AudioInputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -22,6 +24,7 @@ import static org.lwjgl.openal.AL10.AL_FORMAT_MONO16;
 import static org.lwjgl.openal.AL10.AL_FORMAT_STEREO16;
 import static org.lwjgl.openal.AL10.AL_GAIN;
 import static org.lwjgl.openal.AL10.AL_MAX_DISTANCE;
+import static org.lwjgl.openal.AL10.AL_NO_ERROR;
 import static org.lwjgl.openal.AL10.AL_PLAYING;
 import static org.lwjgl.openal.AL10.AL_STOPPED;
 import static org.lwjgl.openal.AL10.AL_POSITION;
@@ -35,6 +38,7 @@ import static org.lwjgl.openal.AL10.alDeleteBuffers;
 import static org.lwjgl.openal.AL10.alDeleteSources;
 import static org.lwjgl.openal.AL10.alGenBuffers;
 import static org.lwjgl.openal.AL10.alGenSources;
+import static org.lwjgl.openal.AL10.alGetError;
 import static org.lwjgl.openal.AL10.alGetSourcei;
 import static org.lwjgl.openal.AL10.alSource3f;
 import static org.lwjgl.openal.AL10.alSourcePause;
@@ -44,11 +48,8 @@ import static org.lwjgl.openal.AL10.alSourceStop;
 import static org.lwjgl.openal.AL10.alSourceUnqueueBuffers;
 import static org.lwjgl.openal.AL10.alSourcef;
 import static org.lwjgl.openal.AL10.alSourcei;
-import static org.lwjgl.openal.AL10.alDistanceModel;
-import static org.lwjgl.openal.AL11.AL_LINEAR_DISTANCE;
 
 public class RadioAudioChannel {
-    private static boolean distanceModelConfigured;
     private static final long STALL_RECOVERY_STARTUP_GRACE_MS = 4_000L;
     private static final long STALL_RECOVERY_THRESHOLD_MS = 6_500L;
     private static final long STALL_RECOVERY_COOLDOWN_MS = 10_000L;
@@ -94,6 +95,8 @@ public class RadioAudioChannel {
     private volatile long lastRecoveryAttemptAtMs;
     private volatile long nextSourceCreateRetryAtMs;
     private volatile long lastSourceCreateErrorLogAtMs;
+    private volatile long lastOpenAlOpErrorLogAtMs;
+    private volatile long sourceCreateFailureSinceMs;
 
     private volatile CompletableFuture<?> decodeTask;
 
@@ -143,12 +146,23 @@ public class RadioAudioChannel {
         return sourceId != -1 && alGetSourcei(sourceId, AL_SOURCE_STATE) == AL_PLAYING;
     }
 
+    public boolean hasPersistentSourceFailure(long thresholdMs) {
+        if (paused || currentUrl.isBlank()) {
+            return false;
+        }
+        long since = sourceCreateFailureSinceMs;
+        if (sourceId != -1 || since <= 0L) {
+            return false;
+        }
+        return System.currentTimeMillis() - since >= Math.max(0L, thresholdMs);
+    }
+
     public boolean isPositional() {
         return spatial;
     }
 
     public void play(String url, long startPositionMs) {
-        stopInternal(false);
+        stopInternal(false, false);
         currentUrl = url == null ? "" : url;
         desiredStartPositionMs = Math.max(0L, startPositionMs);
         pausedPositionMs = -1L;
@@ -162,6 +176,8 @@ public class RadioAudioChannel {
         stallDetectedAtMs = 0L;
         nextSourceCreateRetryAtMs = 0L;
         lastSourceCreateErrorLogAtMs = 0L;
+        lastOpenAlOpErrorLogAtMs = 0L;
+        sourceCreateFailureSinceMs = 0L;
         pcmQueue.clear();
         queuedBuffers.clear();
         long generation = decodeGeneration.incrementAndGet();
@@ -210,7 +226,7 @@ public class RadioAudioChannel {
     }
 
     public void stop() {
-        stopInternal(false);
+        stopInternal(false, true);
     }
 
     public boolean consumeNaturalEnd() {
@@ -221,7 +237,7 @@ public class RadioAudioChannel {
         return true;
     }
 
-    private void stopInternal(boolean naturalEnd) {
+    private void stopInternal(boolean naturalEnd, boolean releaseSource) {
         decodeGeneration.incrementAndGet();
         stopping = true;
         if (decodeTask != null) {
@@ -229,20 +245,29 @@ public class RadioAudioChannel {
             decodeTask = null;
         }
 
+        List<Integer> trackedBufferIds = drainTrackedBufferIds();
+        int[] trackedBufferIdArray = toIntArray(trackedBufferIds);
         if (sourceId != -1) {
-            alSourceStop(sourceId);
-            releaseProcessedBuffers(true);
-            alDeleteSources(sourceId);
-            sourceId = -1;
+            try {
+                alSourceStop(sourceId);
+            } catch (RuntimeException ignored) {
+            }
+            unqueueTrackedBuffersBestEffort(trackedBufferIdArray);
+            if (releaseSource) {
+                try {
+                    alDeleteSources(sourceId);
+                } catch (RuntimeException ignored) {
+                }
+                int deleteSourceError = alGetError();
+                if (deleteSourceError != AL_NO_ERROR) {
+                    logOpenAlOpFailure("alDeleteSources", deleteSourceError, null);
+                }
+                sourceId = -1;
+            }
         }
 
         pcmQueue.clear();
-        while (!queuedBuffers.isEmpty()) {
-            Integer id = queuedBuffers.poll();
-            if (id != null) {
-                alDeleteBuffers(id);
-            }
-        }
+        deleteBuffers(trackedBufferIds);
 
         currentUrl = "";
         lastStartMillis = 0L;
@@ -255,7 +280,10 @@ public class RadioAudioChannel {
         lastRecoveryAttemptAtMs = 0L;
         nextSourceCreateRetryAtMs = 0L;
         lastSourceCreateErrorLogAtMs = 0L;
+        lastOpenAlOpErrorLogAtMs = 0L;
+        sourceCreateFailureSinceMs = 0L;
         endedNaturally = naturalEnd;
+        clearOpenAlErrorState();
     }
 
     public void tick() {
@@ -268,20 +296,35 @@ public class RadioAudioChannel {
             if (nowMs < nextSourceCreateRetryAtMs) {
                 return;
             }
+            clearOpenAlErrorState();
             try {
                 sourceId = alGenSources();
             } catch (RuntimeException exception) {
                 sourceId = -1;
+                if (sourceCreateFailureSinceMs <= 0L) {
+                    sourceCreateFailureSinceMs = nowMs;
+                }
                 nextSourceCreateRetryAtMs = nowMs + SOURCE_CREATE_RETRY_COOLDOWN_MS;
                 maybeLogSourceCreateFailure(exception);
                 return;
             }
-            if (sourceId <= 0) {
+            int sourceCreateError = alGetError();
+            if (sourceCreateError != AL_NO_ERROR || sourceId <= 0) {
+                if (sourceId > 0) {
+                    try {
+                        alDeleteSources(sourceId);
+                    } catch (RuntimeException ignored) {
+                    }
+                }
                 sourceId = -1;
+                if (sourceCreateFailureSinceMs <= 0L) {
+                    sourceCreateFailureSinceMs = nowMs;
+                }
                 nextSourceCreateRetryAtMs = nowMs + SOURCE_CREATE_RETRY_COOLDOWN_MS;
-                maybeLogSourceCreateFailure(null);
+                maybeLogSourceCreateFailure(sourceCreateError, null);
                 return;
             }
+            sourceCreateFailureSinceMs = 0L;
             applySourceSettings();
         }
 
@@ -311,12 +354,14 @@ public class RadioAudioChannel {
         // On some OpenAL backends, EOF can leave queued buffers lingering in STOPPED state.
         // Force-drain when decode has ended so natural-end can always be emitted.
         if (decoderEnded && pcmQueue.isEmpty() && sourceState == AL_STOPPED && !queuedBuffers.isEmpty()) {
-            releaseProcessedBuffers(true);
-            sourceState = alGetSourcei(sourceId, AL_SOURCE_STATE);
+            // Some OpenAL backends report STOPPED while retaining queued buffers.
+            // Treat this as EOF to avoid invalid unqueue operations poisoning the context.
+            stopInternal(true, false);
+            return;
         }
 
         if (decoderEnded && pcmQueue.isEmpty() && queuedBuffers.isEmpty() && sourceState != AL_PLAYING) {
-            stopInternal(true);
+            stopInternal(true, false);
             return;
         }
         attemptStallRecovery(sourceState);
@@ -534,13 +579,58 @@ public class RadioAudioChannel {
                 alFormat = AL_FORMAT_MONO16;
             }
 
-            int bufferId = alGenBuffers();
+            clearOpenAlErrorState();
+            int bufferId;
+            try {
+                bufferId = alGenBuffers();
+            } catch (RuntimeException exception) {
+                logOpenAlOpFailure("alGenBuffers", AL_NO_ERROR, exception);
+                invalidateSourceAfterOpenAlFailure();
+                return;
+            }
+            int genError = alGetError();
+            if (bufferId <= 0 || genError != AL_NO_ERROR) {
+                logOpenAlOpFailure("alGenBuffers", genError, null);
+                if (bufferId > 0) {
+                    deleteBufferSafely(bufferId);
+                }
+                invalidateSourceAfterOpenAlFailure();
+                return;
+            }
             ByteBuffer byteBuffer = BufferUtils.createByteBuffer(data.length);
             byteBuffer.put(data);
             byteBuffer.flip();
-            alBufferData(bufferId, alFormat, byteBuffer, LavaPlayerAccess.SAMPLE_RATE);
+            try {
+                alBufferData(bufferId, alFormat, byteBuffer, LavaPlayerAccess.SAMPLE_RATE);
+            } catch (RuntimeException exception) {
+                logOpenAlOpFailure("alBufferData", AL_NO_ERROR, exception);
+                deleteBufferSafely(bufferId);
+                invalidateSourceAfterOpenAlFailure();
+                return;
+            }
+            int bufferError = alGetError();
+            if (bufferError != AL_NO_ERROR) {
+                logOpenAlOpFailure("alBufferData", bufferError, null);
+                deleteBufferSafely(bufferId);
+                invalidateSourceAfterOpenAlFailure();
+                return;
+            }
 
-            alSourceQueueBuffers(sourceId, bufferId);
+            try {
+                alSourceQueueBuffers(sourceId, bufferId);
+            } catch (RuntimeException exception) {
+                logOpenAlOpFailure("alSourceQueueBuffers", AL_NO_ERROR, exception);
+                deleteBufferSafely(bufferId);
+                invalidateSourceAfterOpenAlFailure();
+                return;
+            }
+            int queueError = alGetError();
+            if (queueError != AL_NO_ERROR) {
+                logOpenAlOpFailure("alSourceQueueBuffers", queueError, null);
+                deleteBufferSafely(bufferId);
+                invalidateSourceAfterOpenAlFailure();
+                return;
+            }
             queuedBuffers.add(bufferId);
         }
     }
@@ -572,13 +662,125 @@ public class RadioAudioChannel {
 
         int processed = all ? queuedBuffers.size() : alGetSourcei(sourceId, AL_BUFFERS_PROCESSED);
         for (int i = 0; i < processed; i++) {
-            if (queuedBuffers.isEmpty()) {
+            Integer trackedBufferId = queuedBuffers.peek();
+            if (trackedBufferId == null) {
                 break;
             }
-            int unqueuedBufferId = alSourceUnqueueBuffers(sourceId);
+            clearOpenAlErrorState();
+            try {
+                alSourceUnqueueBuffers(sourceId);
+            } catch (RuntimeException exception) {
+                logOpenAlOpFailure("alSourceUnqueueBuffers", AL_NO_ERROR, exception);
+                invalidateSourceAfterOpenAlFailure();
+                break;
+            }
+            int unqueueError = alGetError();
+            if (unqueueError != AL_NO_ERROR) {
+                logOpenAlOpFailure("alSourceUnqueueBuffers", unqueueError, null);
+                invalidateSourceAfterOpenAlFailure();
+                break;
+            }
             queuedBuffers.poll();
-            alDeleteBuffers(unqueuedBufferId);
+            deleteBufferSafely(trackedBufferId);
         }
+    }
+
+    private List<Integer> drainTrackedBufferIds() {
+        List<Integer> bufferIds = new ArrayList<>(queuedBuffers.size());
+        while (!queuedBuffers.isEmpty()) {
+            Integer id = queuedBuffers.poll();
+            if (id != null && id > 0) {
+                bufferIds.add(id);
+            }
+        }
+        return bufferIds;
+    }
+
+    private void deleteBuffers(List<Integer> bufferIds) {
+        if (bufferIds == null || bufferIds.isEmpty()) {
+            return;
+        }
+        for (Integer id : bufferIds) {
+            deleteBufferSafely(id);
+        }
+    }
+
+    private void deleteBufferSafely(Integer bufferId) {
+        if (bufferId == null || bufferId <= 0) {
+            return;
+        }
+        try {
+            alDeleteBuffers(bufferId);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void invalidateSourceAfterOpenAlFailure() {
+        List<Integer> trackedBufferIds = drainTrackedBufferIds();
+        int[] trackedBufferIdArray = toIntArray(trackedBufferIds);
+        if (sourceId != -1) {
+            try {
+                alSourceStop(sourceId);
+            } catch (RuntimeException ignored) {
+            }
+            unqueueTrackedBuffersBestEffort(trackedBufferIdArray);
+            try {
+                alDeleteSources(sourceId);
+            } catch (RuntimeException ignored) {
+            }
+            int deleteSourceError = alGetError();
+            if (deleteSourceError != AL_NO_ERROR) {
+                logOpenAlOpFailure("alDeleteSources", deleteSourceError, null);
+            }
+            sourceId = -1;
+        }
+        deleteBuffers(trackedBufferIds);
+        long nowMs = System.currentTimeMillis();
+        if (sourceCreateFailureSinceMs <= 0L) {
+            sourceCreateFailureSinceMs = nowMs;
+        }
+        nextSourceCreateRetryAtMs = nowMs + SOURCE_CREATE_RETRY_COOLDOWN_MS;
+        clearOpenAlErrorState();
+    }
+
+    private void unqueueTrackedBuffersBestEffort(int[] trackedBufferIds) {
+        if (sourceId == -1 || trackedBufferIds == null || trackedBufferIds.length == 0) {
+            return;
+        }
+        clearOpenAlErrorState();
+        try {
+            alSourceUnqueueBuffers(sourceId, trackedBufferIds);
+        } catch (RuntimeException exception) {
+            logOpenAlOpFailure("alSourceUnqueueBuffers(batch)", AL_NO_ERROR, exception);
+            return;
+        }
+        int unqueueError = alGetError();
+        if (unqueueError != AL_NO_ERROR) {
+            logOpenAlOpFailure("alSourceUnqueueBuffers(batch)", unqueueError, null);
+        }
+    }
+
+    private int[] toIntArray(List<Integer> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return new int[0];
+        }
+        int[] result = new int[ids.size()];
+        int writeIndex = 0;
+        for (Integer id : ids) {
+            if (id == null || id <= 0) {
+                continue;
+            }
+            if (writeIndex >= result.length) {
+                break;
+            }
+            result[writeIndex++] = id;
+        }
+        if (writeIndex == result.length) {
+            return result;
+        }
+        int[] trimmed = new int[writeIndex];
+        System.arraycopy(result, 0, trimmed, 0, writeIndex);
+        return trimmed;
     }
 
     private void applySourceSettings() {
@@ -586,7 +788,8 @@ public class RadioAudioChannel {
             return;
         }
 
-        float volume = volumeSupplier.get() == null ? 1.0f : Math.max(0f, Math.min(2f, volumeSupplier.get()));
+        float volume = sanitizeFiniteFloat(volumeSupplier.get(), 1.0f);
+        volume = Math.max(0f, Math.min(2f, volume));
         alSourcef(sourceId, AL_GAIN, volume);
 
         if (spatial) {
@@ -594,11 +797,10 @@ public class RadioAudioChannel {
             if (position == null) {
                 position = Vec3.ZERO;
             }
-            alSourcei(sourceId, AL_SOURCE_RELATIVE, AL_FALSE);
-            if (!distanceModelConfigured) {
-                alDistanceModel(AL_LINEAR_DISTANCE);
-                distanceModelConfigured = true;
+            if (!Double.isFinite(position.x) || !Double.isFinite(position.y) || !Double.isFinite(position.z)) {
+                position = Vec3.ZERO;
             }
+            alSourcei(sourceId, AL_SOURCE_RELATIVE, AL_FALSE);
             alSource3f(sourceId, AL_POSITION, (float) position.x, (float) position.y, (float) position.z);
             alSourcef(sourceId, AL_MAX_DISTANCE, maxDistance);
             alSourcef(sourceId, AL_REFERENCE_DISTANCE, 1.75f);
@@ -609,16 +811,86 @@ public class RadioAudioChannel {
         }
     }
 
+    private float sanitizeFiniteFloat(Float value, float fallback) {
+        if (value == null || !Float.isFinite(value)) {
+            return fallback;
+        }
+        return value;
+    }
+
+    private void clearOpenAlErrorState() {
+        for (int i = 0; i < 8; i++) {
+            if (alGetError() == AL_NO_ERROR) {
+                return;
+            }
+        }
+    }
+
+    private String openAlErrorName(int errorCode) {
+        return switch (errorCode) {
+            case AL_NO_ERROR -> "AL_NO_ERROR";
+            case 0xA001 -> "AL_INVALID_NAME";
+            case 0xA002 -> "AL_INVALID_ENUM";
+            case 0xA003 -> "AL_INVALID_VALUE";
+            case 0xA004 -> "AL_INVALID_OPERATION";
+            case 0xA005 -> "AL_OUT_OF_MEMORY";
+            default -> "UNKNOWN(" + errorCode + ")";
+        };
+    }
+
     private void maybeLogSourceCreateFailure(Throwable throwable) {
+        maybeLogSourceCreateFailure(AL_NO_ERROR, throwable);
+    }
+
+    private void maybeLogSourceCreateFailure(int errorCode, Throwable throwable) {
         long now = System.currentTimeMillis();
         if (now - lastSourceCreateErrorLogAtMs < SOURCE_CREATE_LOG_COOLDOWN_MS) {
             return;
         }
         lastSourceCreateErrorLogAtMs = now;
         if (throwable == null) {
-            MediaRadio.LOGGER.warn("OpenAL source allocation failed for radio channel. Retrying.");
+            if (errorCode == AL_NO_ERROR) {
+                MediaRadio.LOGGER.warn("OpenAL source allocation failed for radio channel. Retrying.");
+            } else {
+                MediaRadio.LOGGER.warn(
+                        "OpenAL source allocation failed for radio channel ({} / {}). Retrying.",
+                        errorCode,
+                        openAlErrorName(errorCode)
+                );
+            }
             return;
         }
-        MediaRadio.LOGGER.warn("OpenAL source allocation failed for radio channel. Retrying.", throwable);
+        if (errorCode == AL_NO_ERROR) {
+            MediaRadio.LOGGER.warn("OpenAL source allocation failed for radio channel. Retrying.", throwable);
+            return;
+        }
+        MediaRadio.LOGGER.warn(
+                "OpenAL source allocation failed for radio channel ({} / {}). Retrying.",
+                errorCode,
+                openAlErrorName(errorCode),
+                throwable
+        );
+    }
+
+    private void logOpenAlOpFailure(String operation, int errorCode, Throwable throwable) {
+        long now = System.currentTimeMillis();
+        if (now - lastOpenAlOpErrorLogAtMs < SOURCE_CREATE_LOG_COOLDOWN_MS) {
+            return;
+        }
+        lastOpenAlOpErrorLogAtMs = now;
+        if (throwable != null) {
+            MediaRadio.LOGGER.warn("OpenAL operation failed for radio channel: {}", operation, throwable);
+            return;
+        }
+        if (errorCode == AL_NO_ERROR) {
+            MediaRadio.LOGGER.warn("OpenAL operation failed for radio channel: {}", operation);
+            return;
+        }
+        MediaRadio.LOGGER.warn(
+                "OpenAL operation failed for radio channel: {} ({} / {})",
+                operation,
+                errorCode,
+                openAlErrorName(errorCode)
+        );
     }
 }

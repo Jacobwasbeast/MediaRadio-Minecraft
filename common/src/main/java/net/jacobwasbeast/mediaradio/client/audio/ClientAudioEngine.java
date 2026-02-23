@@ -20,7 +20,10 @@ import net.minecraft.world.phys.Vec3;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,11 +46,21 @@ public class ClientAudioEngine {
     private static final long REMOTE_SEEK_EVENT_MIN_DRIFT_MS = 1_250L;
     private static final long REMOTE_SEEK_COOLDOWN_MS = 10_000L;
     private static final long BLOCK_RUNTIME_SYNC_INTERVAL_MS = 2_000L;
+    private static final long CHANNEL_STALL_RECOVERY_THRESHOLD_MS = 12_000L;
+    private static final long CHANNEL_SOFT_RECOVERY_COOLDOWN_MS = 12_000L;
+    private static final long CHANNEL_HARD_RECOVERY_COOLDOWN_MS = 35_000L;
+    private static final float BLOCK_CHANNEL_MAX_DISTANCE = 30f;
+    private static final double BLOCK_CHANNEL_ACTIVE_DISTANCE_SQR = BLOCK_CHANNEL_MAX_DISTANCE * BLOCK_CHANNEL_MAX_DISTANCE;
+    private static final int MAX_ACTIVE_BLOCK_CHANNELS = 8;
+    private static final int MAX_ACTIVE_EXTERNAL_CHANNELS = 8;
+    private static final float MIN_ACTIVE_CHANNEL_GAIN = 0.0001f;
 
     private final Map<BlockPos, RadioAudioChannel> blockChannels = new ConcurrentHashMap<>();
     private final Map<BlockPos, Integer> blockSeekVersions = new ConcurrentHashMap<>();
     private final Map<BlockPos, String> blockRuntimeSyncKeys = new ConcurrentHashMap<>();
     private final Map<BlockPos, Long> blockRuntimeSyncAtMs = new ConcurrentHashMap<>();
+    private final Map<BlockPos, Long> blockSilentSinceAtMs = new ConcurrentHashMap<>();
+    private final Map<BlockPos, Long> blockRecoveryAtMs = new ConcurrentHashMap<>();
 
     // Independent handheld playback sessions keyed by radio id.
     private final Map<String, HandheldSession> handheldSessions = new ConcurrentHashMap<>();
@@ -202,6 +215,7 @@ public class ClientAudioEngine {
         session.artist = "";
         session.thumbnail = "";
         session.url = "";
+        session.lastKnownTrackDurationMs = -1L;
         session.intendedPlaying = false;
         session.pausedState = false;
         session.pausedPositionMs = 0L;
@@ -343,16 +357,29 @@ public class ClientAudioEngine {
 
         String title = session.title;
         long position = Math.max(0L, session.pausedPositionMs);
-        long duration = -1L;
+        long duration = session.lastKnownTrackDurationMs;
         boolean playing = false;
         boolean paused = session.pausedState;
 
         if (session.channel != null) {
             title = session.channel.getDisplayTitle();
             position = session.channel.getEstimatedPositionMs();
-            duration = session.channel.getTrackDurationMs();
+            long channelDuration = session.channel.getTrackDurationMs();
+            if (channelDuration > 0L) {
+                duration = channelDuration;
+                session.lastKnownTrackDurationMs = channelDuration;
+            }
             playing = session.channel.isPlaying();
             paused = session.channel.isPaused();
+            if (!playing && !paused && !safe(session.url).isBlank() && (session.pausedState || session.intendedPlaying)) {
+                paused = true;
+            }
+        } else if (!safe(session.url).isBlank() && (session.pausedState || session.intendedPlaying)) {
+            paused = true;
+        }
+
+        if (duration > 0L) {
+            position = Math.min(position, duration);
         }
 
         return new HandheldRenderState(
@@ -562,15 +589,33 @@ public class ClientAudioEngine {
             return;
         }
         HandheldSession session = handheldSessions.get(safeRadioId);
-        if (session != null) {
-            reconfigureSessionChannelMode(session, false);
-        }
         externalContexts.remove(safeRadioId);
         externalRadioIds.remove(safeRadioId);
+
         Minecraft minecraft = Minecraft.getInstance();
-        if (session != null && (minecraft.player == null || findRadioStackById(minecraft, safeRadioId).isEmpty())) {
-            handheldSessions.remove(safeRadioId);
+        if (session == null) {
+            return;
         }
+
+        boolean hasLocalRadio = minecraft.player != null && !findRadioStackById(minecraft, safeRadioId).isEmpty();
+        if (!hasLocalRadio) {
+            if (session.channel != null) {
+                session.pausedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
+            }
+            // Always stop channel before dropping the session entry, otherwise
+            // OpenAL sources can be stranded and starve future playback.
+            stopSessionPlayback(session);
+            session.pausedState = session.intendedPlaying;
+            session.lastExternalSyncKey = "";
+            session.lastExternalRuntimeSyncKey = "";
+            handheldSessions.remove(safeRadioId);
+            if (safeRadioId.equals(activeHandheldRadioId)) {
+                activeHandheldRadioId = "";
+            }
+            return;
+        }
+
+        reconfigureSessionChannelMode(session, false);
     }
 
     public void primeHandheldState(String url, String title, String artist, String thumbnail, long positionMs, float volume) {
@@ -713,6 +758,8 @@ public class ClientAudioEngine {
         blockSeekVersions.clear();
         blockRuntimeSyncKeys.clear();
         blockRuntimeSyncAtMs.clear();
+        blockSilentSinceAtMs.clear();
+        blockRecoveryAtMs.clear();
     }
 
     public long getBlockPlaybackPositionMs(BlockPos blockPos) {
@@ -792,6 +839,7 @@ public class ClientAudioEngine {
             ended = true;
         }
         if (!ended) {
+            recoverSilentSessionChannel(minecraft, session, System.currentTimeMillis());
             persistRuntimeToSession(minecraft, session);
             return;
         }
@@ -841,6 +889,7 @@ public class ClientAudioEngine {
             session.pausedPositionMs = 0L;
             session.pausedState = false;
             session.intendedPlaying = false;
+            session.lastKnownTrackDurationMs = -1L;
             sendHandheldControlCommand(
                     session,
                     ServerboundRadioControlMessage.Action.STOP,
@@ -885,6 +934,7 @@ public class ClientAudioEngine {
             orphaned.artist = "";
             orphaned.thumbnail = "";
             orphaned.url = "";
+            orphaned.lastKnownTrackDurationMs = -1L;
             orphaned.pausedState = false;
             orphaned.pausedPositionMs = 0L;
             orphaned.intendedPlaying = false;
@@ -897,6 +947,7 @@ public class ClientAudioEngine {
     }
 
     private void tickNonActiveExternalSessions(Minecraft minecraft) {
+        List<ExternalSessionCandidate> activeCandidates = new ArrayList<>();
         for (String radioId : externalRadioIds) {
             if (radioId == null || radioId.isBlank() || radioId.equals(activeHandheldRadioId)) {
                 continue;
@@ -914,6 +965,30 @@ public class ClientAudioEngine {
                 persistRuntimeToSession(minecraft, session);
                 continue;
             }
+            activeCandidates.add(new ExternalSessionCandidate(
+                    radioId,
+                    session,
+                    resolveExternalDistanceSqr(minecraft, radioId)
+            ));
+        }
+
+        activeCandidates.sort(Comparator.comparingDouble(ExternalSessionCandidate::distanceSqr));
+        int activeCount = 0;
+        long nowMs = System.currentTimeMillis();
+        for (ExternalSessionCandidate candidate : activeCandidates) {
+            String radioId = candidate.radioId();
+            HandheldSession session = candidate.session();
+            if (activeCount >= MAX_ACTIVE_EXTERNAL_CHANNELS) {
+                if (session.channel != null) {
+                    session.pausedPositionMs = Math.max(0L, session.channel.getEstimatedPositionMs());
+                    stopSessionPlayback(session);
+                }
+                session.pausedState = !session.url.isBlank();
+                persistRuntimeToSession(minecraft, session);
+                continue;
+            }
+            activeCount++;
+
             if (session.channel == null) {
                 if (session.intendedPlaying && !session.url.isBlank()) {
                     resumeSessionIfHeld(minecraft, session);
@@ -941,6 +1016,8 @@ public class ClientAudioEngine {
                                     : net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage.Context.HANDHELD
                     );
                 }
+            } else {
+                recoverSilentSessionChannel(minecraft, session, nowMs);
             }
             persistRuntimeToSession(minecraft, session);
         }
@@ -1013,22 +1090,18 @@ public class ClientAudioEngine {
     }
 
     private void playSession(HandheldSession session, String url, long positionMs, String displayTitle, String artist, String thumbnail) {
-        boolean shouldBePositional = shouldUsePositionalChannel(Minecraft.getInstance(), session);
-        if (session.channel == null || session.channel.isPositional() != shouldBePositional) {
-            if (session.channel != null) {
-                session.channel.stop();
-            }
-            session.channel = createSessionChannel(session, shouldBePositional);
-        }
-        session.channel.setDisplayTitle(displayTitle);
-        session.channel.play(url, positionMs);
+        String previousUrl = safe(session.url);
         session.url = url == null ? "" : url;
+        if (!sameTrack(previousUrl, session.url)) {
+            session.lastKnownTrackDurationMs = -1L;
+        }
         session.title = displayTitle == null ? "" : displayTitle;
         session.artist = artist == null ? "" : artist;
         session.thumbnail = thumbnail == null ? "" : thumbnail;
         session.pausedPositionMs = Math.max(0L, positionMs);
         session.pausedState = false;
         session.intendedPlaying = true;
+        ensureSessionChannel(Minecraft.getInstance(), session, session.pausedPositionMs, true);
     }
 
     private void stopSessionPlayback(HandheldSession session) {
@@ -1036,6 +1109,8 @@ public class ClientAudioEngine {
             session.channel.stop();
             session.channel = null;
         }
+        session.lastObservedChannelProgressAtMs = 0L;
+        session.lastObservedChannelPositionMs = 0L;
     }
 
     private void resumeSessionIfHeld(Minecraft minecraft, HandheldSession session) {
@@ -1045,36 +1120,116 @@ public class ClientAudioEngine {
         if (!isRadioInInventory(minecraft, session.radioId)) {
             return;
         }
-
-        boolean shouldBePositional = shouldUsePositionalChannel(minecraft, session);
-        if (session.channel == null) {
-            session.channel = createSessionChannel(session, shouldBePositional);
-            session.channel.setDisplayTitle(session.title);
-            session.channel.play(session.url, Math.max(0L, session.pausedPositionMs));
-            session.pausedState = false;
+        if (!ensureSessionChannel(minecraft, session, session.pausedPositionMs, false)) {
             return;
         }
-
-        if (session.channel.isPositional() != shouldBePositional) {
-            session.channel.stop();
-            session.channel = createSessionChannel(session, shouldBePositional);
-            session.channel.setDisplayTitle(session.title);
-            session.channel.play(session.url, Math.max(0L, session.pausedPositionMs));
-            session.pausedState = false;
-            return;
-        }
-
-        if (!session.url.equals(session.channel.getCurrentUrl())) {
-            session.channel.setDisplayTitle(session.title);
-            session.channel.play(session.url, Math.max(0L, session.pausedPositionMs));
-            session.pausedState = false;
-            return;
-        }
-
-        if (session.channel.isPaused()) {
+        if (session.channel.isPaused() || !session.channel.isPlaying()) {
             session.channel.resume();
-            session.pausedState = false;
         }
+        session.pausedState = false;
+        recordSessionPlaybackProgress(session, session.channel.getEstimatedPositionMs(), System.currentTimeMillis());
+    }
+
+    private void recordSessionPlaybackProgress(HandheldSession session, long positionMs, long nowMs) {
+        if (session == null) {
+            return;
+        }
+        session.lastObservedChannelPositionMs = Math.max(0L, positionMs);
+        session.lastObservedChannelProgressAtMs = Math.max(0L, nowMs);
+    }
+
+    private boolean recoverSilentSessionChannel(Minecraft minecraft, HandheldSession session, long nowMs) {
+        if (session == null
+                || session.channel == null
+                || session.url.isBlank()
+                || session.pausedState
+                || !session.intendedPlaying) {
+            return false;
+        }
+
+        RadioAudioChannel channel = session.channel;
+        long observedPosition = Math.max(0L, channel.getEstimatedPositionMs());
+        if (channel.hasPersistentSourceFailure(CHANNEL_STALL_RECOVERY_THRESHOLD_MS)) {
+            if (nowMs - session.lastHardRecoveryAttemptAtMs < CHANNEL_HARD_RECOVERY_COOLDOWN_MS) {
+                return false;
+            }
+            session.lastHardRecoveryAttemptAtMs = nowMs;
+            long resumePosition = Math.max(observedPosition, Math.max(0L, session.pausedPositionMs));
+            stopSessionPlayback(session);
+            if (!ensureSessionChannel(minecraft, session, resumePosition, true)) {
+                return false;
+            }
+            session.pausedState = false;
+            session.pausedPositionMs = resumePosition;
+            recordSessionPlaybackProgress(session, resumePosition, nowMs);
+            return true;
+        }
+        if (channel.isPlaying()) {
+            if (observedPosition > session.lastObservedChannelPositionMs + 32L
+                    || nowMs - session.lastObservedChannelProgressAtMs >= 1_000L) {
+                recordSessionPlaybackProgress(session, observedPosition, nowMs);
+            }
+            return false;
+        }
+        if (channel.isPaused()) {
+            return false;
+        }
+
+        long stallForMs = nowMs - Math.max(0L, session.lastObservedChannelProgressAtMs);
+        if (stallForMs < CHANNEL_STALL_RECOVERY_THRESHOLD_MS) {
+            return false;
+        }
+
+        long resumePosition = Math.max(observedPosition, Math.max(0L, session.pausedPositionMs));
+        if (nowMs - session.lastSoftRecoveryAttemptAtMs >= CHANNEL_SOFT_RECOVERY_COOLDOWN_MS) {
+            session.lastSoftRecoveryAttemptAtMs = nowMs;
+            channel.play(session.url, resumePosition);
+            channel.setDisplayTitle(session.title);
+            session.pausedState = false;
+            session.pausedPositionMs = resumePosition;
+            recordSessionPlaybackProgress(session, resumePosition, nowMs);
+            return true;
+        }
+
+        if (stallForMs < CHANNEL_HARD_RECOVERY_COOLDOWN_MS
+                || nowMs - session.lastHardRecoveryAttemptAtMs < CHANNEL_HARD_RECOVERY_COOLDOWN_MS) {
+            return false;
+        }
+
+        session.lastHardRecoveryAttemptAtMs = nowMs;
+        stopSessionPlayback(session);
+        if (!ensureSessionChannel(minecraft, session, resumePosition, true)) {
+            return false;
+        }
+        session.pausedState = false;
+        session.pausedPositionMs = resumePosition;
+        recordSessionPlaybackProgress(session, resumePosition, nowMs);
+        return true;
+    }
+
+    private boolean ensureSessionChannel(Minecraft minecraft, HandheldSession session, long startPositionMs, boolean forceRestart) {
+        if (session == null || session.url == null || session.url.isBlank()) {
+            return false;
+        }
+        boolean shouldBePositional = shouldUsePositionalChannel(minecraft, session);
+        boolean recreate = session.channel == null || session.channel.isPositional() != shouldBePositional;
+        if (recreate) {
+            stopSessionPlayback(session);
+            session.channel = createSessionChannel(session, shouldBePositional);
+        }
+        if (session.channel == null) {
+            return false;
+        }
+
+        session.channel.setDisplayTitle(session.title);
+        long clampedPosition = Math.max(0L, startPositionMs);
+        boolean trackMismatch = !session.url.equals(session.channel.getCurrentUrl());
+        if (forceRestart || recreate || trackMismatch) {
+            session.channel.play(session.url, clampedPosition);
+            session.pausedPositionMs = clampedPosition;
+            recordSessionPlaybackProgress(session, clampedPosition, System.currentTimeMillis());
+        }
+        return true;
     }
 
     private void reconfigureSessionChannelMode(HandheldSession session, boolean shouldBePositional) {
@@ -1084,25 +1239,21 @@ public class ClientAudioEngine {
 
         long resumePosition = session.channel.getEstimatedPositionMs();
         boolean shouldKeepPlaying = session.intendedPlaying;
-        String activeUrl = session.url;
-        String activeTitle = session.title;
         stopSessionPlayback(session);
-        if (activeUrl == null || activeUrl.isBlank()) {
+        session.pausedPositionMs = Math.max(0L, resumePosition);
+        if (session.url == null || session.url.isBlank()) {
             return;
         }
-
-        session.channel = createSessionChannel(session, shouldBePositional);
-        session.channel.setDisplayTitle(activeTitle);
-        session.channel.play(activeUrl, Math.max(0L, resumePosition));
         if (!shouldKeepPlaying) {
-            session.channel.pause();
             session.pausedState = true;
-        } else {
-            session.pausedState = false;
-            session.channel.resume();
+            return;
         }
-        session.intendedPlaying = shouldKeepPlaying;
-        session.pausedPositionMs = Math.max(0L, resumePosition);
+        if (!ensureSessionChannel(Minecraft.getInstance(), session, session.pausedPositionMs, true)) {
+            return;
+        }
+        session.pausedState = false;
+        session.channel.resume();
+        recordSessionPlaybackProgress(session, session.pausedPositionMs, System.currentTimeMillis());
     }
 
     private RadioAudioChannel createSessionChannel(HandheldSession session, boolean shouldBePositional) {
@@ -1159,6 +1310,28 @@ public class ClientAudioEngine {
             return HANDHELD_EXTERNAL_MAX_DISTANCE;
         }
         return CONTRAPTION_EXTERNAL_MAX_DISTANCE;
+    }
+
+    private double resolveExternalDistanceSqr(Minecraft minecraft, String radioId) {
+        if (minecraft == null || minecraft.player == null) {
+            return Double.MAX_VALUE;
+        }
+        ExternalRadioContext context = externalContexts.get(radioId);
+        if (context == null) {
+            return Double.MAX_VALUE;
+        }
+        Vec3 sourcePos = context.lastKnownPos;
+        if (minecraft.level != null) {
+            Entity sourceEntity = minecraft.level.getEntity(context.contraptionEntityId);
+            if (sourceEntity != null) {
+                sourcePos = sourceEntity.position();
+                context.lastKnownPos = sourcePos;
+            }
+        }
+        if (sourcePos == null) {
+            return Double.MAX_VALUE;
+        }
+        return minecraft.player.position().distanceToSqr(sourcePos);
     }
 
     private void syncActiveContextFromHeldHands(Minecraft minecraft) {
@@ -1355,7 +1528,11 @@ public class ClientAudioEngine {
             return;
         }
 
+        String previousUrl = safe(session.url);
         session.url = safe(url);
+        if (!sameTrack(previousUrl, session.url)) {
+            session.lastKnownTrackDurationMs = -1L;
+        }
         session.title = safe(title);
         session.artist = safe(artist);
         session.thumbnail = safe(thumbnail);
@@ -1364,24 +1541,29 @@ public class ClientAudioEngine {
         session.pausedState = !playing && (!session.url.isBlank() || !session.title.isBlank());
         session.intendedPlaying = playing;
 
+        if (session.url.isBlank()) {
+            stopSessionPlayback(session);
+            session.pausedState = false;
+            return;
+        }
+
         boolean shouldBePositional = shouldUsePositionalChannel(Minecraft.getInstance(), session);
-        if (session.channel == null && playing && !session.url.isBlank()) {
-            session.channel = createSessionChannel(session, shouldBePositional);
-            session.channel.setDisplayTitle(session.title);
-            session.channel.play(session.url, session.pausedPositionMs);
+        if (playing && !ensureSessionChannel(Minecraft.getInstance(), session, session.pausedPositionMs, false)) {
             return;
         }
 
         if (session.channel != null) {
             reconfigureSessionChannelMode(session, shouldBePositional);
+            if (session.channel == null) {
+                return;
+            }
             if (!session.title.isBlank()) {
                 session.channel.setDisplayTitle(session.title);
             }
-            boolean sameTrack = !session.url.isBlank() && sameTrack(session.url, session.channel.getCurrentUrl());
-            if (!session.url.isBlank() && !sameTrack) {
+            boolean sameTrack = sameTrack(session.url, session.channel.getCurrentUrl());
+            if (!sameTrack) {
                 if (!shouldApplyRemotePositionCorrection(session) || forcePositionSync) {
-                    session.channel.play(session.url, session.pausedPositionMs);
-                    sameTrack = true;
+                    sameTrack = ensureSessionChannel(Minecraft.getInstance(), session, session.pausedPositionMs, true);
                 }
             }
 
@@ -1409,6 +1591,7 @@ public class ClientAudioEngine {
                     session.channel.resume();
                 }
                 session.pausedState = false;
+                recordSessionPlaybackProgress(session, session.channel.getEstimatedPositionMs(), System.currentTimeMillis());
             } else {
                 if (!session.channel.isPaused()) {
                     session.channel.pause();
@@ -1878,6 +2061,7 @@ public class ClientAudioEngine {
 
     private void scanBlockRadios(Minecraft minecraft) {
         Set<BlockPos> activePositions = new HashSet<>();
+        List<BlockRadioCandidate> candidates = new ArrayList<>();
         BlockPos playerPos = minecraft.player.blockPosition();
         BlockPos.MutableBlockPos mutableBlockPos = new BlockPos.MutableBlockPos();
         int horizontalRange = 30;
@@ -1895,56 +2079,86 @@ public class ClientAudioEngine {
 
                     BlockPos blockPos = radioBlockEntity.getBlockPos();
                     if (!radioBlockEntity.isPlaying() || radioBlockEntity.getMediaUrl().isBlank()) {
-                        RadioAudioChannel existing = blockChannels.remove(blockPos);
-                        if (existing != null) {
-                            existing.stop();
-                        }
-                        blockSeekVersions.remove(blockPos);
-                        blockRuntimeSyncKeys.remove(blockPos);
-                        blockRuntimeSyncAtMs.remove(blockPos);
+                        cleanupBlockChannel(blockPos);
                         continue;
                     }
 
-                    activePositions.add(blockPos);
-
-                    RadioAudioChannel channel = blockChannels.computeIfAbsent(blockPos,
-                            ignored -> new RadioAudioChannel(
-                                    true,
-                                    () -> Vec3.atCenterOf(blockPos),
-                                    () -> resolveBlockChannelVolume(radioBlockEntity.getVolume()),
-                                    30f));
-
-                    long targetPosition = radioBlockEntity.getPlaybackPositionMs();
-                    int seekVersion = radioBlockEntity.getSeekVersion();
-                    Integer previousSeekVersion = blockSeekVersions.get(blockPos);
-                    boolean seekVersionChanged = previousSeekVersion == null || previousSeekVersion != seekVersion;
-                    long delta = Math.abs(channel.getEstimatedPositionMs() - targetPosition);
-                    if (!radioBlockEntity.getMediaUrl().equals(channel.getCurrentUrl()) || delta > 2500L || seekVersionChanged) {
-                        channel.setDisplayTitle(radioBlockEntity.getMediaTitle());
-                        channel.play(radioBlockEntity.getMediaUrl(), targetPosition);
-                    }
-                    blockSeekVersions.put(blockPos, seekVersion);
+                    double distanceSqr = minecraft.player.distanceToSqr(
+                            blockPos.getX() + 0.5D,
+                            blockPos.getY() + 0.5D,
+                            blockPos.getZ() + 0.5D
+                    );
+                    candidates.add(new BlockRadioCandidate(blockPos.immutable(), radioBlockEntity, distanceSqr));
                 }
             }
+        }
+
+        candidates.sort(Comparator.comparingDouble(BlockRadioCandidate::distanceSqr));
+        int remainingBudget = MAX_ACTIVE_BLOCK_CHANNELS;
+        for (BlockRadioCandidate candidate : candidates) {
+            BlockPos blockPos = candidate.blockPos();
+            RadioBlockEntity radioBlockEntity = candidate.blockEntity();
+            if (radioBlockEntity == null || radioBlockEntity.isRemoved() || !radioBlockEntity.isPlaying() || radioBlockEntity.getMediaUrl().isBlank()) {
+                cleanupBlockChannel(blockPos);
+                continue;
+            }
+
+            float channelVolume = resolveBlockChannelVolume(radioBlockEntity.getVolume());
+            boolean audible = candidate.distanceSqr() <= BLOCK_CHANNEL_ACTIVE_DISTANCE_SQR && channelVolume > MIN_ACTIVE_CHANNEL_GAIN;
+            if (!audible || remainingBudget <= 0) {
+                cleanupBlockChannel(blockPos);
+                continue;
+            }
+
+            remainingBudget--;
+            activePositions.add(blockPos);
+
+            RadioAudioChannel channel = blockChannels.computeIfAbsent(blockPos,
+                    ignored -> new RadioAudioChannel(
+                            true,
+                            () -> Vec3.atCenterOf(blockPos),
+                            () -> resolveBlockChannelVolume(radioBlockEntity.getVolume()),
+                            BLOCK_CHANNEL_MAX_DISTANCE));
+
+            long targetPosition = radioBlockEntity.getPlaybackPositionMs();
+            int seekVersion = radioBlockEntity.getSeekVersion();
+            Integer previousSeekVersion = blockSeekVersions.get(blockPos);
+            boolean seekVersionChanged = previousSeekVersion == null || previousSeekVersion != seekVersion;
+            long delta = Math.abs(channel.getEstimatedPositionMs() - targetPosition);
+            if (!radioBlockEntity.getMediaUrl().equals(channel.getCurrentUrl()) || delta > 2500L || seekVersionChanged) {
+                channel.setDisplayTitle(radioBlockEntity.getMediaTitle());
+                channel.play(radioBlockEntity.getMediaUrl(), targetPosition);
+            }
+            blockSeekVersions.put(blockPos, seekVersion);
         }
 
         Set<BlockPos> stale = new HashSet<>(blockChannels.keySet());
         stale.removeAll(activePositions);
         for (BlockPos stalePos : stale) {
-            RadioAudioChannel channel = blockChannels.remove(stalePos);
-            if (channel != null) {
-                channel.stop();
-            }
-            blockSeekVersions.remove(stalePos);
-            blockRuntimeSyncKeys.remove(stalePos);
-            blockRuntimeSyncAtMs.remove(stalePos);
+            cleanupBlockChannel(stalePos);
         }
+    }
+
+    private void cleanupBlockChannel(BlockPos blockPos) {
+        if (blockPos == null) {
+            return;
+        }
+        RadioAudioChannel channel = blockChannels.remove(blockPos);
+        if (channel != null) {
+            channel.stop();
+        }
+        blockSeekVersions.remove(blockPos);
+        blockRuntimeSyncKeys.remove(blockPos);
+        blockRuntimeSyncAtMs.remove(blockPos);
+        blockSilentSinceAtMs.remove(blockPos);
+        blockRecoveryAtMs.remove(blockPos);
     }
 
     private void tickBlockChannels(Minecraft minecraft) {
         if (minecraft.level == null) {
             return;
         }
+        long nowMs = System.currentTimeMillis();
         Set<BlockPos> staleChannels = new HashSet<>();
         for (Map.Entry<BlockPos, RadioAudioChannel> entry : blockChannels.entrySet()) {
             BlockPos blockPos = entry.getKey();
@@ -1961,8 +2175,26 @@ public class ClientAudioEngine {
                 ended = true;
             }
             if (!ended) {
+                if (radioBlockEntity.isPlaying() && !safe(radioBlockEntity.getMediaUrl()).isBlank()) {
+                    if (channel.isPlaying() || channel.isPaused()) {
+                        blockSilentSinceAtMs.remove(blockPos);
+                    } else {
+                        long silentSince = blockSilentSinceAtMs.computeIfAbsent(blockPos, ignored -> nowMs);
+                        long lastRecoveryAt = blockRecoveryAtMs.getOrDefault(blockPos, 0L);
+                        if (nowMs - silentSince >= CHANNEL_STALL_RECOVERY_THRESHOLD_MS
+                                && nowMs - lastRecoveryAt >= CHANNEL_SOFT_RECOVERY_COOLDOWN_MS) {
+                            long resumePosition = Math.max(channel.getEstimatedPositionMs(), Math.max(0L, radioBlockEntity.getPlaybackPositionMs()));
+                            channel.setDisplayTitle(radioBlockEntity.getMediaTitle());
+                            channel.play(radioBlockEntity.getMediaUrl(), resumePosition);
+                            blockSeekVersions.put(blockPos, radioBlockEntity.getSeekVersion());
+                            blockRecoveryAtMs.put(blockPos, nowMs);
+                            blockSilentSinceAtMs.put(blockPos, nowMs);
+                        }
+                    }
+                }
                 continue;
             }
+            blockSilentSinceAtMs.remove(blockPos);
             if (radioBlockEntity.isPlaying() && !safe(radioBlockEntity.getMediaUrl()).isBlank()) {
                 channel.setDisplayTitle(radioBlockEntity.getMediaTitle());
                 channel.play(radioBlockEntity.getMediaUrl(), Math.max(0L, radioBlockEntity.getPlaybackPositionMs()));
@@ -1972,13 +2204,7 @@ public class ClientAudioEngine {
             staleChannels.add(blockPos);
         }
         for (BlockPos blockPos : staleChannels) {
-            RadioAudioChannel channel = blockChannels.remove(blockPos);
-            if (channel != null) {
-                channel.stop();
-            }
-            blockSeekVersions.remove(blockPos);
-            blockRuntimeSyncKeys.remove(blockPos);
-            blockRuntimeSyncAtMs.remove(blockPos);
+            cleanupBlockChannel(blockPos);
         }
     }
 
@@ -2095,6 +2321,7 @@ public class ClientAudioEngine {
         private String url = "";
         private boolean pausedState;
         private long pausedPositionMs;
+        private long lastKnownTrackDurationMs = -1L;
         private boolean intendedPlaying;
         private String lastSyncedRuntimeKey = "";
         private String lastExternalSyncKey = "";
@@ -2103,6 +2330,10 @@ public class ClientAudioEngine {
         private long lastServerRevision = -1L;
         private long lastRemoteSeekAtMs;
         private long lastServerSentAtMs;
+        private long lastObservedChannelPositionMs;
+        private long lastObservedChannelProgressAtMs;
+        private long lastSoftRecoveryAttemptAtMs;
+        private long lastHardRecoveryAttemptAtMs;
         private int seekSerial;
 
         private HandheldSession(String radioId) {
@@ -2136,6 +2367,20 @@ public class ClientAudioEngine {
             }
             return this.localPos.equals(blockPos);
         }
+    }
+
+    private record BlockRadioCandidate(
+            BlockPos blockPos,
+            RadioBlockEntity blockEntity,
+            double distanceSqr
+    ) {
+    }
+
+    private record ExternalSessionCandidate(
+            String radioId,
+            HandheldSession session,
+            double distanceSqr
+    ) {
     }
 
     public record HandheldRenderState(
