@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.3
+
+- Reworked client OpenAL source/buffer lifecycle to prevent long-session source exhaustion and silent new playback sessions.
+- Added stronger channel recovery for source allocation/queue failures, including deterministic source invalidation and rebuild.
+- Fixed external session teardown paths that could leak active channels when contexts were removed.
+- Added client sound-engine reload hooks to fully reset Media Radio channels on backend sound resets.
+- Reduced active concurrent radio channel pressure with conservative speaker caps and prioritized nearest external playback channels.
+- Improved runtime state normalization and channel synchronization to reduce stalled paused/stopped transitions between queue entries.
+
 ## 1.3.2
 
 - Fixed client playback channel/session lifecycle issues that could cause new radios to produce no audio while older sessions continued playing.
