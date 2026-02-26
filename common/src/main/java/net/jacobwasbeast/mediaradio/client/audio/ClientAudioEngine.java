@@ -1288,12 +1288,7 @@ public class ClientAudioEngine {
         if (minecraft.level == null || minecraft.player == null) {
             return 0f;
         }
-        Vec3 sourcePos = context.lastKnownPos;
-        Entity sourceEntity = minecraft.level.getEntity(context.contraptionEntityId);
-        if (sourceEntity != null) {
-            sourcePos = sourceEntity.position();
-            context.lastKnownPos = sourcePos;
-        }
+        Vec3 sourcePos = resolveExternalSourcePosition(context);
         double maxDistanceSqr = context.localPos == null ? HANDHELD_EXTERNAL_MAX_DISTANCE_SQR : CONTRAPTION_EXTERNAL_MAX_DISTANCE_SQR;
         if (sourcePos == null || minecraft.player.position().distanceToSqr(sourcePos) > maxDistanceSqr) {
             return 0f;
@@ -1320,14 +1315,7 @@ public class ClientAudioEngine {
         if (context == null) {
             return Double.MAX_VALUE;
         }
-        Vec3 sourcePos = context.lastKnownPos;
-        if (minecraft.level != null) {
-            Entity sourceEntity = minecraft.level.getEntity(context.contraptionEntityId);
-            if (sourceEntity != null) {
-                sourcePos = sourceEntity.position();
-                context.lastKnownPos = sourcePos;
-            }
-        }
+        Vec3 sourcePos = resolveExternalSourcePosition(context);
         if (sourcePos == null) {
             return Double.MAX_VALUE;
         }
@@ -1393,6 +1381,19 @@ public class ClientAudioEngine {
             existing.manualControl = existing.manualControl || manualControl;
             externalRadioIds.add(radioId);
             return;
+        }
+
+        if (existing != null) {
+            boolean existingIsSpatial = existing.localPos != null;
+            boolean incomingIsSpatial = localPos != null;
+            // Avoid replacing a contraption/block context with a generic listener context.
+            if (existingIsSpatial && !incomingIsSpatial) {
+                existing.lastSeenGameTick = nowTick;
+                existing.inventoryPlayback = existing.inventoryPlayback || inventoryPlayback;
+                existing.manualControl = existing.manualControl || manualControl;
+                externalRadioIds.add(radioId);
+                return;
+            }
         }
 
         ExternalRadioContext context = new ExternalRadioContext(contraptionEntityId, localPos, inventoryPlayback, manualControl);

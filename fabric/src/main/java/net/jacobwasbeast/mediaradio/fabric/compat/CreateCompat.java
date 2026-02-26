@@ -99,23 +99,24 @@ public final class CreateCompat {
             if (context.contraption == null || context.contraption.entity == null) {
                 return;
             }
-
-            CompoundTag nbt = context.blockEntityData;
+            CompoundTag nbt = resolveMovementNbt(context);
             String radioId = nbt == null ? "" : nbt.getString(RadioBlockEntity.TAG_RADIO_ID);
             if (radioId.isBlank()) {
                 return;
             }
 
-            String mediaUrl = safe(nbt, RadioBlockEntity.TAG_MEDIA_URL);
+            ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+            ClientAudioEngine.HandheldRenderState runtime = audioEngine.getRenderStateForRadioId(radioId);
 
-            String mediaTitle = safe(nbt, RadioBlockEntity.TAG_MEDIA_TITLE);
-            String mediaArtist = safe(nbt, RadioBlockEntity.TAG_MEDIA_ARTIST);
-            String mediaThumbnail = safe(nbt, RadioBlockEntity.TAG_MEDIA_THUMBNAIL);
-            boolean playing = nbt != null && nbt.getBoolean(RadioBlockEntity.TAG_PLAYING);
-            long positionMs = playbackFromNbt(nbt);
-            float volume = nbt == null ? 1.0f : nbt.getFloat(RadioBlockEntity.TAG_VOLUME);
+            String mediaUrl = pick(runtime == null ? "" : runtime.url(), safe(nbt, RadioBlockEntity.TAG_MEDIA_URL));
+            String mediaTitle = pick(runtime == null ? "" : runtime.title(), safe(nbt, RadioBlockEntity.TAG_MEDIA_TITLE));
+            String mediaArtist = pick(runtime == null ? "" : runtime.artist(), safe(nbt, RadioBlockEntity.TAG_MEDIA_ARTIST));
+            String mediaThumbnail = pick(runtime == null ? "" : runtime.thumbnail(), safe(nbt, RadioBlockEntity.TAG_MEDIA_THUMBNAIL));
+            boolean playing = runtime != null ? runtime.playing() : (nbt != null && nbt.getBoolean(RadioBlockEntity.TAG_PLAYING));
+            long positionMs = runtime != null ? runtime.positionMs() : playbackFromNbt(nbt);
+            float volume = runtime != null ? runtime.volume() : (nbt == null ? 1.0f : nbt.getFloat(RadioBlockEntity.TAG_VOLUME));
 
-            ClientAudioEngine.getInstance().syncExternalContraptionState(
+            audioEngine.syncExternalContraptionState(
                     radioId,
                     context.contraption.entity.getId(),
                     context.localPos,
@@ -140,17 +141,17 @@ public final class CreateCompat {
                 return;
             }
 
-            CompoundTag nbt = context.blockEntityData;
+            CompoundTag nbt = resolveMovementNbt(context);
             String radioId = nbt == null ? "" : nbt.getString(RadioBlockEntity.TAG_RADIO_ID);
             if (radioId.isBlank()) {
                 return;
             }
 
             ClientAudioEngine.HandheldRenderState runtime = ClientAudioEngine.getInstance().getRenderStateForRadioId(radioId);
-            String mediaUrl = runtime != null ? safe(runtime.url()) : safe(nbt, RadioBlockEntity.TAG_MEDIA_URL);
-            String mediaTitle = runtime != null ? safe(runtime.title()) : safe(nbt, RadioBlockEntity.TAG_MEDIA_TITLE);
-            String mediaArtist = runtime != null ? safe(runtime.artist()) : safe(nbt, RadioBlockEntity.TAG_MEDIA_ARTIST);
-            String mediaThumbnail = runtime != null ? safe(runtime.thumbnail()) : safe(nbt, RadioBlockEntity.TAG_MEDIA_THUMBNAIL);
+            String mediaUrl = pick(runtime == null ? "" : runtime.url(), safe(nbt, RadioBlockEntity.TAG_MEDIA_URL));
+            String mediaTitle = pick(runtime == null ? "" : runtime.title(), safe(nbt, RadioBlockEntity.TAG_MEDIA_TITLE));
+            String mediaArtist = pick(runtime == null ? "" : runtime.artist(), safe(nbt, RadioBlockEntity.TAG_MEDIA_ARTIST));
+            String mediaThumbnail = pick(runtime == null ? "" : runtime.thumbnail(), safe(nbt, RadioBlockEntity.TAG_MEDIA_THUMBNAIL));
             boolean playing = runtime != null ? runtime.playing() : (nbt != null && nbt.getBoolean(RadioBlockEntity.TAG_PLAYING));
             long positionMs = runtime != null ? runtime.positionMs() : playbackFromNbt(nbt);
             float volume = runtime != null ? runtime.volume() : (nbt == null ? 1.0f : nbt.getFloat(RadioBlockEntity.TAG_VOLUME));
@@ -173,6 +174,33 @@ public final class CreateCompat {
                     0x00F000F0
             );
             poseStack.popPose();
+        }
+
+        private static CompoundTag resolveMovementNbt(MovementContext context) {
+            CompoundTag direct = context == null ? null : context.blockEntityData;
+            if (direct != null && !safe(direct, RadioBlockEntity.TAG_RADIO_ID).isBlank()) {
+                return direct;
+            }
+            if (context == null || context.localPos == null || context.contraption == null) {
+                return direct;
+            }
+            try {
+                Map<?, ?> blocks = (Map<?, ?>) context.contraption.getClass().getMethod("getBlocks").invoke(context.contraption);
+                Object blockInfoObj = blocks.get(context.localPos);
+                if (!(blockInfoObj instanceof StructureTemplate.StructureBlockInfo blockInfo)) {
+                    return direct;
+                }
+                CompoundTag fallback = blockInfo.nbt();
+                if (fallback == null) {
+                    return direct;
+                }
+                if (direct == null || safe(direct, RadioBlockEntity.TAG_RADIO_ID).isBlank()) {
+                    return fallback;
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Fall back to direct movement data when reflection access is unavailable.
+            }
+            return direct;
         }
 
         private static long playbackFromNbt(CompoundTag nbt) {
@@ -199,6 +227,14 @@ public final class CreateCompat {
 
         private static String safe(String value) {
             return value == null ? "" : value;
+        }
+
+        private static String pick(String preferred, String fallback) {
+            String resolvedPreferred = safe(preferred);
+            if (!resolvedPreferred.isBlank()) {
+                return resolvedPreferred;
+            }
+            return safe(fallback);
         }
     }
 }

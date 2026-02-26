@@ -369,9 +369,14 @@ public class SharedMediaManager {
                 String syncedThumbnail = safe(message.thumbnail());
                 long syncedDurationMs = message.trackDurationMs();
                 String runtimeUrl = safe(runtimeState.url);
+                boolean changed = false;
+                if (runtimeUrl.isBlank() && !syncedUrl.isBlank()) {
+                    runtimeState.url = syncedUrl;
+                    runtimeUrl = syncedUrl;
+                    changed = true;
+                }
                 boolean trackMatches = !runtimeUrl.isBlank()
                         && ((!syncedUrl.isBlank() && sameTrack(runtimeUrl, syncedUrl)) || syncedUrl.isBlank());
-                boolean changed = false;
                 // Runtime sync packets from clients are advisory only. Never let them override
                 // authoritative transport decisions (play/pause/seek/queue pointer).
                 if (trackMatches && syncedDurationMs > 0L && runtimeState.trackDurationMs != syncedDurationMs) {
@@ -573,7 +578,7 @@ public class SharedMediaManager {
         RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
         ensureSessionIdentity(state, runtimeKey);
         long nowMs = System.currentTimeMillis();
-        if (normalizeRuntimeStateForAccess(runtimeData, state, nowMs, true)) {
+        if (normalizeRuntimeStateForAccess(runtimeData, state, nowMs, false)) {
             preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
             markRuntimeMutation(state, runtimeKey, nowMs);
             runtimeData.setDirty();
@@ -679,11 +684,31 @@ public class SharedMediaManager {
             return null;
         }
 
-        Map<String, RadioRuntimeStateSavedData.RadioRuntimeState> candidates = new LinkedHashMap<>();
         RadioRuntimeStateSavedData.RadioRuntimeState primary = runtimeData.get(primaryKey);
         if (primary != null) {
-            candidates.put(primaryKey, primary);
+            boolean cleanedAliases = false;
+            if (!radioId.isBlank()) {
+                String legacyKey = safe(radioId);
+                if (!legacyKey.isBlank() && !legacyKey.equals(primaryKey) && runtimeData.states().remove(legacyKey) != null) {
+                    cleanedAliases = true;
+                }
+                String blockAlias = scopedRuntimeKey(RUNTIME_SCOPE_BLOCK, radioId);
+                if (!blockAlias.equals(primaryKey) && runtimeData.states().remove(blockAlias) != null) {
+                    cleanedAliases = true;
+                }
+                String handheldAlias = scopedRuntimeKey(RUNTIME_SCOPE_HANDHELD, radioId);
+                if (!handheldAlias.equals(primaryKey) && runtimeData.states().remove(handheldAlias) != null) {
+                    cleanedAliases = true;
+                }
+            }
+            if (cleanedAliases) {
+                runtimeData.setDirty();
+            }
+            ensureSessionIdentity(primary, primaryKey);
+            return primary;
         }
+
+        Map<String, RadioRuntimeStateSavedData.RadioRuntimeState> candidates = new LinkedHashMap<>();
 
         if (!radioId.isBlank()) {
             String legacyKey = safe(radioId);
