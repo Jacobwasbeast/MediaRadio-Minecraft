@@ -28,6 +28,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -38,8 +39,10 @@ public class LavaPlayerAccess {
     public static final int BYTES_PER_SECOND = SAMPLE_RATE * 2 * 2;
     private static final long TRACK_LOAD_TIMEOUT_SECONDS = 20L;
     private static final long PLAYLIST_LOAD_TIMEOUT_SECONDS = 25L;
+    private static final long PLAYLIST_STREAM_TIMEOUT_SECONDS = 120L;
     private static final int TIMEOUT_FAILURES_BEFORE_RESET = 3;
     private static final long MANAGER_RESET_COOLDOWN_MS = 20_000L;
+    private static final int YOUTUBE_PLAYLIST_PAGE_COUNT = 100;
     private static final Pattern YOUTUBE_WATCH_PATTERN = Pattern.compile("(?:youtu\\.be/|youtube\\.com/(?:watch\\?v=|shorts/|live/))([A-Za-z0-9_-]{11})");
     private static final Pattern YOUTUBE_V_PARAM_PATTERN = Pattern.compile("[?&]v=([A-Za-z0-9_-]{11})");
 
@@ -159,7 +162,7 @@ public class LavaPlayerAccess {
             return CompletableFuture.completedFuture(List.of());
         }
 
-        int limit = Math.max(1, maxTracks);
+        int limit = maxTracks <= 0 ? Integer.MAX_VALUE : Math.max(1, maxTracks);
         CompletableFuture<List<SearchResult>> future = new CompletableFuture<>();
         Future<Void> loadFuture = audioPlayerManager.loadItem(normalizedIdentifier, new AudioLoadResultHandler() {
             @Override
@@ -201,6 +204,87 @@ public class LavaPlayerAccess {
             }
         });
         return withTimeoutGuard(normalizedIdentifier, future, loadFuture, PLAYLIST_LOAD_TIMEOUT_SECONDS);
+    }
+
+    public CompletableFuture<Integer> streamPlaylistTracks(
+            String identifier,
+            int batchSize,
+            Consumer<List<SearchResult>> batchConsumer
+    ) {
+        String normalizedIdentifier = normalizeIdentifier(identifier);
+        if (normalizedIdentifier.isBlank()) {
+            return CompletableFuture.completedFuture(0);
+        }
+
+        int resolvedBatchSize = Math.max(1, batchSize);
+        Consumer<List<SearchResult>> safeBatchConsumer = batchConsumer == null ? ignored -> {
+        } : batchConsumer;
+        CompletableFuture<Integer> future = new CompletableFuture<>();
+        Future<Void> loadFuture = audioPlayerManager.loadItem(normalizedIdentifier, new AudioLoadResultHandler() {
+            @Override
+            public void trackLoaded(AudioTrack track) {
+                try {
+                    List<SearchResult> batch = new ArrayList<>(1);
+                    if (track != null) {
+                        batch.add(toSearchResult(track));
+                    }
+                    safeBatchConsumer.accept(batch);
+                    if (future.complete(batch.size())) {
+                        recordLoadSuccess();
+                    }
+                } catch (Exception exception) {
+                    if (future.completeExceptionally(exception)) {
+                        recordLoadFailure(normalizedIdentifier, exception);
+                    }
+                }
+            }
+
+            @Override
+            public void playlistLoaded(AudioPlaylist playlist) {
+                try {
+                    int emitted = 0;
+                    List<SearchResult> batch = new ArrayList<>(resolvedBatchSize);
+                    for (AudioTrack track : playlist.getTracks()) {
+                        if (track == null) {
+                            continue;
+                        }
+                        batch.add(toSearchResult(track));
+                        if (batch.size() < resolvedBatchSize) {
+                            continue;
+                        }
+                        safeBatchConsumer.accept(List.copyOf(batch));
+                        emitted += batch.size();
+                        batch.clear();
+                    }
+                    if (!batch.isEmpty()) {
+                        safeBatchConsumer.accept(List.copyOf(batch));
+                        emitted += batch.size();
+                    }
+                    if (future.complete(emitted)) {
+                        recordLoadSuccess();
+                    }
+                } catch (Exception exception) {
+                    if (future.completeExceptionally(exception)) {
+                        recordLoadFailure(normalizedIdentifier, exception);
+                    }
+                }
+            }
+
+            @Override
+            public void noMatches() {
+                if (future.complete(0)) {
+                    recordLoadSuccess();
+                }
+            }
+
+            @Override
+            public void loadFailed(FriendlyException exception) {
+                if (future.completeExceptionally(exception)) {
+                    recordLoadFailure(normalizedIdentifier, exception);
+                }
+            }
+        });
+        return withTimeoutGuard(normalizedIdentifier, future, loadFuture, PLAYLIST_STREAM_TIMEOUT_SECONDS);
     }
 
     public OpenedTrack openTrack(AudioTrack sourceTrack, long positionMs) {
@@ -317,6 +401,8 @@ public class LavaPlayerAccess {
         try {
             // Exact same construction style as IamMusicPlayer_FIX-1.20.1.
             YoutubeAudioSourceManager sourceManager = new YoutubeAudioSourceManager();
+            // Default page count can truncate larger playlists (~120 tracks).
+            sourceManager.setPlaylistPageCount(YOUTUBE_PLAYLIST_PAGE_COUNT);
             manager.registerSourceManager((AudioSourceManager) sourceManager);
         } catch (Exception exception) {
             MediaRadio.LOGGER.warn("YouTube source manager not available, YouTube playback may fail", exception);

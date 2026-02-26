@@ -353,6 +353,112 @@ public class ClientMediaRepository {
         return copied.id;
     }
 
+    public synchronized String importPlaylistTracks(
+            String playlistName,
+            SharedMediaSnapshot.PlaylistAccess access,
+            List<PlaylistImportTrack> tracks,
+            boolean playlistOnly
+    ) {
+        String playlistId = beginPlaylistImport(playlistName, access);
+        if (playlistId.isBlank()) {
+            return "";
+        }
+
+        int addedCount = appendPlaylistImportTracks(playlistId, tracks, playlistOnly);
+        if (addedCount <= 0) {
+            abandonPlaylistImport(playlistId);
+            return "";
+        }
+
+        return completePlaylistImport(playlistId);
+    }
+
+    public synchronized String beginPlaylistImport(String playlistName, SharedMediaSnapshot.PlaylistAccess access) {
+        String resolvedName = playlistName == null || playlistName.isBlank()
+                ? "Imported Playlist"
+                : playlistName.trim();
+        PlayerIdentity identity = localPlayerIdentity();
+        SharedMediaSnapshot.PlaylistEntry playlist = snapshot.createPlaylist(
+                resolvedName,
+                identity.playerId(),
+                identity.playerName(),
+                access == null ? SharedMediaSnapshot.PlaylistAccess.PRIVATE : access
+        );
+        if (playlist == null || playlist.id == null || playlist.id.isBlank()) {
+            return "";
+        }
+        return playlist.id;
+    }
+
+    public synchronized int appendPlaylistImportTracks(
+            String playlistId,
+            List<PlaylistImportTrack> tracks,
+            boolean playlistOnly
+    ) {
+        SharedMediaSnapshot.PlaylistEntry playlist = snapshot.playlists.get(playlistId);
+        if (playlist == null || tracks == null || tracks.isEmpty()) {
+            return 0;
+        }
+
+        int addedCount = 0;
+        Set<String> knownPlaylistMediaIds = new HashSet<>(playlist.mediaIds);
+        for (PlaylistImportTrack track : tracks) {
+            if (track == null) {
+                continue;
+            }
+            String url = safe(track.url);
+            if (url.isBlank()) {
+                continue;
+            }
+            String mediaId = SharedMediaSnapshot.idForUrl(url);
+            SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.library.get(mediaId);
+            if (mediaEntry == null) {
+                mediaEntry = snapshot.upsertMedia(
+                        url,
+                        safe(track.title),
+                        safe(track.artist),
+                        safe(track.thumbnail),
+                        List.of(),
+                        playlistOnly
+                );
+            }
+            if (mediaEntry == null || mediaEntry.id == null || mediaEntry.id.isBlank()) {
+                continue;
+            }
+            if (!knownPlaylistMediaIds.add(mediaEntry.id)) {
+                continue;
+            }
+            playlist.mediaIds.add(mediaEntry.id);
+            addedCount++;
+            if (playlist.thumbnail == null || playlist.thumbnail.isBlank()) {
+                playlist.thumbnail = safe(track.thumbnail);
+            }
+        }
+        return addedCount;
+    }
+
+    public synchronized String completePlaylistImport(String playlistId) {
+        SharedMediaSnapshot.PlaylistEntry playlist = snapshot.playlists.get(playlistId);
+        if (playlist == null) {
+            return "";
+        }
+        if (playlist.mediaIds == null || playlist.mediaIds.isEmpty()) {
+            snapshot.playlists.remove(playlistId);
+            pruneUnreferencedHiddenMedia();
+            return "";
+        }
+        persistAndUpload();
+        return playlistId;
+    }
+
+    public synchronized void abandonPlaylistImport(String playlistId) {
+        if (playlistId == null || playlistId.isBlank()) {
+            return;
+        }
+        snapshot.playlists.remove(playlistId);
+        pruneUnreferencedHiddenMedia();
+    }
+
     public synchronized void enqueue(String mediaId) {
         QueueState queueState = activeQueueState();
         if (!snapshot.library.containsKey(mediaId)) {
@@ -478,6 +584,12 @@ public class ClientMediaRepository {
             }
         }
         sanitizeQueue(queueState);
+        saveCache();
+    }
+
+    public synchronized void clearQueue() {
+        QueueState queueState = activeQueueState();
+        clearQueueState(queueState);
         saveCache();
     }
 
@@ -854,6 +966,34 @@ public class ClientMediaRepository {
         }
         saveCache();
         ModNetworking.uploadSharedSnapshot(snapshot.toJson());
+    }
+
+    private void pruneUnreferencedHiddenMedia() {
+        Set<String> referencedMediaIds = new HashSet<>();
+        for (SharedMediaSnapshot.PlaylistEntry playlist : snapshot.playlists.values()) {
+            if (playlist == null || playlist.mediaIds == null) {
+                continue;
+            }
+            for (String mediaId : playlist.mediaIds) {
+                if (mediaId != null && !mediaId.isBlank()) {
+                    referencedMediaIds.add(mediaId);
+                }
+            }
+        }
+        for (QueueState queueState : queuesByRadioId.values()) {
+            for (QueueItem queueItem : queueState.queueItems) {
+                if (queueItem != null && queueItem.mediaId != null && !queueItem.mediaId.isBlank()) {
+                    referencedMediaIds.add(queueItem.mediaId);
+                }
+            }
+        }
+        snapshot.library.entrySet().removeIf(entry -> {
+            SharedMediaSnapshot.MediaEntry mediaEntry = entry.getValue();
+            if (mediaEntry == null || !mediaEntry.hiddenFromLibrary) {
+                return false;
+            }
+            return !referencedMediaIds.contains(entry.getKey());
+        });
     }
 
     private void loadCache() {
@@ -1251,6 +1391,14 @@ public class ClientMediaRepository {
         private String title = "";
         private String artist = "";
         private String thumbnail = "";
+    }
+
+    public record PlaylistImportTrack(
+            String url,
+            String title,
+            String artist,
+            String thumbnail
+    ) {
     }
 
     private record PlayerIdentity(String playerId, String playerName) {

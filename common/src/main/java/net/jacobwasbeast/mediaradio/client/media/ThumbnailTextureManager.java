@@ -26,8 +26,10 @@ public final class ThumbnailTextureManager {
     private static final ThumbnailTextureManager INSTANCE = new ThumbnailTextureManager();
     private static final TextureHandle FALLBACK = new TextureHandle(MissingTextureAtlasSprite.getLocation(), 16, 16);
     private static final long RETRY_AFTER_FAILURE_MS = 15_000L;
+    private static final int MAX_LIVE_TEXTURES = 10;
 
     private final Map<String, TextureHandle> cache = new ConcurrentHashMap<>();
+    private final Map<String, Long> lastAccessAtMs = new ConcurrentHashMap<>();
     private final Map<String, Long> failedLoads = new ConcurrentHashMap<>();
     private final Set<String> loading = ConcurrentHashMap.newKeySet();
     private final ExecutorService ioExecutor = Executors.newFixedThreadPool(2, new ThreadFactory() {
@@ -56,6 +58,7 @@ public final class ThumbnailTextureManager {
 
         TextureHandle existing = cache.get(safeUrl);
         if (existing != null) {
+            touch(safeUrl);
             if (existing.location().equals(MissingTextureAtlasSprite.getLocation()) && shouldRetry(safeUrl)) {
                 requestLoad(safeUrl);
             }
@@ -104,11 +107,14 @@ public final class ThumbnailTextureManager {
                 minecraft.execute(() -> {
                     minecraft.getTextureManager().register(id, dynamicTexture);
                     cache.put(url, new TextureHandle(id, width, height));
+                    touch(url);
                     failedLoads.remove(url);
+                    trimLiveTextureCache(minecraft);
                 });
             } catch (Exception ignored) {
                 failedLoads.put(url, System.currentTimeMillis());
                 cache.put(url, FALLBACK);
+                touch(url);
             } finally {
                 if (inputStream != null) {
                     try {
@@ -122,6 +128,94 @@ public final class ThumbnailTextureManager {
                 loading.remove(url);
             }
         });
+    }
+
+    public void clearSessionCache() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null) {
+            cache.clear();
+            lastAccessAtMs.clear();
+            failedLoads.clear();
+            loading.clear();
+            return;
+        }
+        minecraft.execute(() -> {
+            for (TextureHandle handle : cache.values()) {
+                if (handle == null || isFallback(handle)) {
+                    continue;
+                }
+                releaseTexture(minecraft, handle.location());
+            }
+            cache.clear();
+            lastAccessAtMs.clear();
+            failedLoads.clear();
+            loading.clear();
+        });
+    }
+
+    private void trimLiveTextureCache(Minecraft minecraft) {
+        int liveCount = countLiveTextures();
+        if (liveCount <= MAX_LIVE_TEXTURES) {
+            return;
+        }
+
+        while (liveCount > MAX_LIVE_TEXTURES) {
+            String oldestUrl = null;
+            long oldestAccess = Long.MAX_VALUE;
+            for (Map.Entry<String, TextureHandle> entry : cache.entrySet()) {
+                TextureHandle handle = entry.getValue();
+                if (handle == null || isFallback(handle)) {
+                    continue;
+                }
+                String key = entry.getKey();
+                Long touchedAt = lastAccessAtMs.get(key);
+                long accessed = touchedAt == null ? 0L : touchedAt;
+                if (accessed < oldestAccess) {
+                    oldestAccess = accessed;
+                    oldestUrl = key;
+                }
+            }
+
+            if (oldestUrl == null) {
+                return;
+            }
+
+            TextureHandle removed = cache.remove(oldestUrl);
+            lastAccessAtMs.remove(oldestUrl);
+            failedLoads.remove(oldestUrl);
+            if (removed != null && !isFallback(removed)) {
+                releaseTexture(minecraft, removed.location());
+            }
+            liveCount--;
+        }
+    }
+
+    private int countLiveTextures() {
+        int count = 0;
+        for (TextureHandle handle : cache.values()) {
+            if (handle != null && !isFallback(handle)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void touch(String url) {
+        if (url == null || url.isBlank()) {
+            return;
+        }
+        lastAccessAtMs.put(url, System.currentTimeMillis());
+    }
+
+    private boolean isFallback(TextureHandle handle) {
+        return handle.location().equals(FALLBACK.location());
+    }
+
+    private void releaseTexture(Minecraft minecraft, ResourceLocation resourceLocation) {
+        try {
+            minecraft.getTextureManager().release(resourceLocation);
+        } catch (Exception ignored) {
+        }
     }
 
     private boolean shouldRetry(String url) {

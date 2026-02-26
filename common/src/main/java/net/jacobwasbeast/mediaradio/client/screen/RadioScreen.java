@@ -29,6 +29,7 @@ import net.minecraft.world.InteractionHand;
 import java.util.List;
 import java.util.Locale;
 import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class RadioScreen extends Screen {
 
@@ -46,6 +47,7 @@ public class RadioScreen extends Screen {
     private static final int PLAYLIST_ROW_HEIGHT = 20;
     private static final int SOURCE_ROW_HEIGHT = 34;
     private static final int SOURCE_THUMB_SIZE = 30;
+    private static final int YOUTUBE_PLAYLIST_IMPORT_BATCH_SIZE = 64;
 
     private static final int COLOR_BG_TOP = 0xEC070A0D;
     private static final int COLOR_BG_BOTTOM = 0xF0010205;
@@ -132,6 +134,7 @@ public class RadioScreen extends Screen {
     private int selectedImportIndex = -1;
     private boolean playlistImportLoading;
     private String playlistImportStatus = "Pick an import source to begin.";
+    private String loadedYoutubePlaylistIdentifier = "";
 
     private RadioScreen(BlockPos blockPos, InteractionHand hand, String fixedBlockRadioId, int contraptionEntityId, BlockPos contraptionLocalPos) {
         super(Component.literal("Media Radio"));
@@ -345,13 +348,14 @@ public class RadioScreen extends Screen {
         int rightW = nowRightPanelW();
         int actionY = nowRightActionY();
         int actionGap = 6;
-        int actionW = (rightW - 16 - (actionGap * 3)) / 4;
+        int actionW = (rightW - 16 - (actionGap * 4)) / 5;
         int actionX = rightX + 8;
 
         addRenderableWidget(new StyledButton(actionX, actionY, actionW, 20, Component.literal("▶ Play"), this::playSelectedQueue, false, false));
         addRenderableWidget(new StyledButton(actionX + actionW + actionGap, actionY, actionW, 20, Component.literal("✖ Remove"), this::removeSelectedQueue, false, false));
-        addRenderableWidget(new StyledButton(actionX + (actionW + actionGap) * 2, actionY, actionW, 20, Component.literal("↑ Up"), () -> moveSelectedQueue(-1), false, false));
-        addRenderableWidget(new StyledButton(actionX + (actionW + actionGap) * 3, actionY, actionW, 20, Component.literal("↓ Down"), () -> moveSelectedQueue(1), false, false));
+        addRenderableWidget(new StyledButton(actionX + (actionW + actionGap) * 2, actionY, actionW, 20, Component.literal("🧹 Clear"), this::clearQueueNow, false, false));
+        addRenderableWidget(new StyledButton(actionX + (actionW + actionGap) * 3, actionY, actionW, 20, Component.literal("↑ Up"), () -> moveSelectedQueue(-1), false, false));
+        addRenderableWidget(new StyledButton(actionX + (actionW + actionGap) * 4, actionY, actionW, 20, Component.literal("↓ Down"), () -> moveSelectedQueue(1), false, false));
     }
 
     private void buildLibraryTab() {
@@ -847,7 +851,8 @@ public class RadioScreen extends Screen {
                 guiGraphics.drawString(font, trim(track.title(), 52), x + 46, lineTop + 6, selected ? 0xFFFFFFFF : COLOR_TEXT, false);
                 guiGraphics.drawString(font, trim(track.artist().isBlank() ? "Unknown Artist" : track.artist(), 40), x + 46, lineTop + 16, COLOR_MUTED, false);
             }
-            guiGraphics.drawString(font, "Tracks: " + importYoutubeTracks.size(), x + 8, listY + listH - 16, COLOR_MUTED, false);
+            String previewLabel = "Preview tracks: " + importYoutubeTracks.size();
+            guiGraphics.drawString(font, previewLabel, x + 8, listY + listH - 16, COLOR_MUTED, false);
             return;
         }
 
@@ -1516,8 +1521,8 @@ public class RadioScreen extends Screen {
         if (entry == null && !tracks.isEmpty()) {
             entry = tracks.get(0);
         }
-        broadcastQueueStateNow();
         playEntry(entry, false);
+        broadcastQueueStateNow();
     }
 
     private void playSelectedPlaylistTrack() {
@@ -1600,6 +1605,7 @@ public class RadioScreen extends Screen {
         selectedImportIndex = -1;
         playlistImportScroll = 0;
         importYoutubeTracks.clear();
+        loadedYoutubePlaylistIdentifier = "";
         playlistImportStatus = source == PlaylistImportSource.YOUTUBE
                 ? "Paste a YouTube playlist URL, then load."
                 : "Select a playlist and import a local copy.";
@@ -1624,13 +1630,17 @@ public class RadioScreen extends Screen {
             playlistImportStatus = "Enter a YouTube playlist URL first.";
             return;
         }
+        if (playlistImportLoading) {
+            return;
+        }
         playlistImportLoading = true;
-        playlistImportStatus = "Loading playlist tracks...";
+        playlistImportStatus = "Loading playlist preview...";
         importYoutubeTracks.clear();
         selectedImportIndex = -1;
         playlistImportScroll = 0;
+        loadedYoutubePlaylistIdentifier = "";
 
-        LavaPlayerAccess.get().loadPlaylistTracks(identifier, 200).whenComplete((tracks, error) -> {
+        LavaPlayerAccess.get().loadPlaylistTracks(identifier, 0).whenComplete((tracks, error) -> {
             if (minecraft == null) {
                 return;
             }
@@ -1650,15 +1660,23 @@ public class RadioScreen extends Screen {
                     playlistImportStatus = "No tracks found.";
                     return;
                 }
+                loadedYoutubePlaylistIdentifier = identifier;
                 selectedImportIndex = 0;
-                playlistImportStatus = "Loaded " + importYoutubeTracks.size() + " tracks.";
+                playlistImportStatus = "Loaded preview for " + importYoutubeTracks.size() + " tracks. Import includes all tracks.";
             });
         });
     }
 
     private void importYoutubePlaylistAsNew() {
-        if (importYoutubeTracks.isEmpty()) {
-            playlistImportStatus = "Load a YouTube playlist first.";
+        if (playlistImportLoading) {
+            return;
+        }
+        String identifier = importPlaylistSourceInput == null ? "" : importPlaylistSourceInput.getValue().trim();
+        if (identifier.isBlank()) {
+            identifier = loadedYoutubePlaylistIdentifier;
+        }
+        if (identifier.isBlank()) {
+            playlistImportStatus = "Enter a YouTube playlist URL first.";
             return;
         }
         String name = importPlaylistNameInput == null ? "" : importPlaylistNameInput.getValue().trim();
@@ -1667,22 +1685,69 @@ public class RadioScreen extends Screen {
         }
 
         ClientMediaRepository repository = ClientMediaRepository.getInstance();
-        String playlistId = repository.createPlaylist(name, SharedMediaSnapshot.PlaylistAccess.PRIVATE);
-        for (LavaPlayerAccess.SearchResult track : importYoutubeTracks) {
-            SharedMediaSnapshot.MediaEntry entry = repository.upsertPlaylistOnlyMedia(
-                    track.identifier(),
-                    track.title(),
-                    track.artist(),
-                    MediaMetadataResolver.bestThumbnail(track.thumbnail(), track.identifier()),
-                    List.of()
-            );
-            repository.addMediaToPlaylist(playlistId, entry.id);
+        String playlistId = repository.beginPlaylistImport(name, SharedMediaSnapshot.PlaylistAccess.PRIVATE);
+        if (playlistId.isBlank()) {
+            playlistImportStatus = "Failed to create playlist.";
+            return;
         }
-        selectedPlaylistId = playlistId;
-        playlistPage = PlaylistPage.BROWSE;
-        selectedPlaylistTrackIndex = -1;
-        playlistImportStatus = "Imported playlist: " + trim(name, 32);
-        rebuildRadioWidgets();
+
+        playlistImportLoading = true;
+        playlistImportStatus = "Importing playlist...";
+        importYoutubeTracks.clear();
+        selectedImportIndex = -1;
+        playlistImportScroll = 0;
+        AtomicInteger importedCount = new AtomicInteger();
+
+        LavaPlayerAccess.get().streamPlaylistTracks(
+                identifier,
+                YOUTUBE_PLAYLIST_IMPORT_BATCH_SIZE,
+                batch -> {
+                    if (batch == null || batch.isEmpty()) {
+                        return;
+                    }
+                    List<ClientMediaRepository.PlaylistImportTrack> importBatch = new ArrayList<>(batch.size());
+                    for (LavaPlayerAccess.SearchResult track : batch) {
+                        if (track == null || track.identifier() == null || track.identifier().isBlank()) {
+                            continue;
+                        }
+                        importBatch.add(new ClientMediaRepository.PlaylistImportTrack(
+                                track.identifier(),
+                                track.title(),
+                                track.artist(),
+                                MediaMetadataResolver.bestThumbnail(track.thumbnail(), track.identifier())
+                        ));
+                    }
+                    if (importBatch.isEmpty()) {
+                        return;
+                    }
+                    importedCount.addAndGet(repository.appendPlaylistImportTracks(playlistId, importBatch, true));
+                }
+        ).whenComplete((loadedCount, error) -> {
+            if (minecraft == null) {
+                return;
+            }
+            minecraft.execute(() -> {
+                playlistImportLoading = false;
+                if (error != null) {
+                    repository.abandonPlaylistImport(playlistId);
+                    playlistImportStatus = "Import failed.";
+                    return;
+                }
+
+                String completedPlaylistId = repository.completePlaylistImport(playlistId);
+                if (completedPlaylistId.isBlank()) {
+                    playlistImportStatus = "No tracks imported.";
+                    return;
+                }
+
+                selectedPlaylistId = completedPlaylistId;
+                playlistPage = PlaylistPage.BROWSE;
+                selectedPlaylistTrackIndex = -1;
+                int totalLoaded = loadedCount == null ? importedCount.get() : Math.max(0, loadedCount);
+                playlistImportStatus = "Imported " + importedCount.get() + " tracks from " + totalLoaded + " discovered.";
+                rebuildRadioWidgets();
+            });
+        });
     }
 
     private void importSelectedSharedPlaylistCopy() {
@@ -1795,6 +1860,19 @@ public class RadioScreen extends Screen {
             selectedQueueIndex = Math.min(selectedQueueIndex, queueSize - 1);
         }
 
+        persistRuntimeState();
+    }
+
+    private void clearQueueNow() {
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        if (repository.getQueueEntries().isEmpty()) {
+            return;
+        }
+        stopPlayback();
+        repository.clearQueue();
+        selectedQueueIndex = -1;
+        queueScroll = 0;
+        broadcastQueueStateNow();
         persistRuntimeState();
     }
 

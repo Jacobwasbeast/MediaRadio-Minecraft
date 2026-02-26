@@ -14,6 +14,7 @@ import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.client.audio.ClientAudioEngine;
 import net.jacobwasbeast.mediaradio.client.audio.LavaPlayerNativeLoader;
 import net.jacobwasbeast.mediaradio.client.data.ClientMediaRepository;
+import net.jacobwasbeast.mediaradio.client.media.ThumbnailTextureManager;
 import net.jacobwasbeast.mediaradio.client.render.RadioBlockEntityRenderer;
 import net.jacobwasbeast.mediaradio.client.screen.RadioScreen;
 import net.jacobwasbeast.mediaradio.client.media.MediaMetadataResolver;
@@ -47,6 +48,7 @@ public class MediaRadioClient {
         Balm.getEvents().onEvent(net.blay09.mods.balm.api.event.client.DisconnectedFromServerEvent.class,
                 event -> {
                     ClientAudioEngine.getInstance().stopAll();
+                    ThumbnailTextureManager.getInstance().clearSessionCache();
                     ClientMediaRepository.getInstance().resetAndReloadCache();
                 });
     }
