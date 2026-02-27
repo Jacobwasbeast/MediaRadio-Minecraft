@@ -5,5 +5,5 @@ dependencies {
     }
     implementation("net.blay09.mods:kuma-api-common:${kuma_version}")
     implementation("dev.arbjerg:lavaplayer:2.2.6")
-    implementation("dev.lavalink.youtube:v2:1.17.0")
+    implementation("dev.lavalink.youtube:v2:1.18.0")
 }
