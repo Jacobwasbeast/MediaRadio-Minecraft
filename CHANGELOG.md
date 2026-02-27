@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0
+
+- Reworked radio runtime state handling to be server-authoritative with listener resync, reducing stale client/runtime desync behavior.
+- Added chunked queue state networking so large playlist/queue updates sync fully instead of being truncated.
+- Fixed expensive queue packet trimming paths that could stall ticks and trigger watchdog shutdowns on very large queue payloads.
+- Fixed block radio queue action reliability so move/remove/shuffle/loop queue changes no longer get rolled back by stale state imports.
+- Improved playlist import flow and queue controls, including better large queue handling and UI queue operation consistency.
+- Tightened Create Interactive compatibility paths on both Fabric and Forge.
+- Updated `dev.lavalink.youtube:v2` from `1.17.0` to `1.18.0`.
+
 ## 1.3.3
 
 - Reworked client OpenAL source/buffer lifecycle to prevent long-session source exhaustion and silent new playback sessions.
