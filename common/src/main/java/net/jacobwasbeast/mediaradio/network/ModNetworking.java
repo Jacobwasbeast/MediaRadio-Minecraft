@@ -3,6 +3,7 @@ package net.jacobwasbeast.mediaradio.network;
 import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.network.BalmNetworking;
 import net.jacobwasbeast.mediaradio.MediaRadio;
+import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioQueueChunkMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaChunkMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundPlayerRadioContextMessage;
@@ -10,6 +11,7 @@ import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage
 import net.jacobwasbeast.mediaradio.network.message.ClientboundOpenContraptionRadioMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioQueueChunkMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundSharedMediaChunkMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundSharedMediaMessage;
@@ -26,6 +28,8 @@ public class ModNetworking {
     private static final Logger LOGGER = LoggerFactory.getLogger(ModNetworking.class);
     private static final int SHARED_MEDIA_DIRECT_THRESHOLD = 10_000;
     private static final int SHARED_MEDIA_CHUNK_SIZE = 8_000;
+    private static final int RADIO_QUEUE_DIRECT_THRESHOLD = 30_000;
+    private static final int RADIO_QUEUE_CHUNK_SIZE = 8_000;
     private static final AtomicLong COMMAND_SEQUENCE = new AtomicLong();
 
     public static void initialize(BalmNetworking networking) {
@@ -94,6 +98,41 @@ public class ModNetworking {
                                 );
                     } catch (Exception exception) {
                         LOGGER.error("Failed to apply radio runtime state on client", exception);
+                    }
+                }
+        );
+
+        networking.registerClientboundPacket(
+                MediaRadio.id("radio_queue_chunk"),
+                ClientboundRadioQueueChunkMessage.class,
+                ClientboundRadioQueueChunkMessage::encode,
+                ClientboundRadioQueueChunkMessage::new,
+                (player, message) -> {
+                    if (!Balm.getProxy().isClient()) {
+                        return;
+                    }
+                    try {
+                        Class<?> clientClass = Class.forName("net.jacobwasbeast.mediaradio.client.MediaRadioClient");
+                        clientClass.getMethod(
+                                        "applyServerRadioQueueStateChunk",
+                                        String.class,
+                                        long.class,
+                                        String.class,
+                                        int.class,
+                                        int.class,
+                                        String.class
+                                )
+                                .invoke(
+                                        null,
+                                        message.radioId(),
+                                        message.revision(),
+                                        message.transferId(),
+                                        message.chunkIndex(),
+                                        message.totalChunks(),
+                                        message.chunkData()
+                                );
+                    } catch (Exception exception) {
+                        LOGGER.error("Failed to apply radio queue chunk on client", exception);
                     }
                 }
         );
@@ -221,6 +260,14 @@ public class ModNetworking {
         );
 
         networking.registerServerboundPacket(
+                MediaRadio.id("radio_queue_upload_chunk"),
+                ServerboundRadioQueueChunkMessage.class,
+                ServerboundRadioQueueChunkMessage::encode,
+                ServerboundRadioQueueChunkMessage::new,
+                SharedMediaManager::handleRadioQueueChunk
+        );
+
+        networking.registerServerboundPacket(
                 MediaRadio.id("radio_state_request"),
                 ServerboundRequestRadioStateMessage.class,
                 ServerboundRequestRadioStateMessage::encode,
@@ -317,6 +364,13 @@ public class ModNetworking {
                     nextCommandId()
             );
         }
+        if (outbound.action() == ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE) {
+            String queueStateJson = outbound.url() == null ? "" : outbound.url();
+            if (queueStateJson.length() > RADIO_QUEUE_DIRECT_THRESHOLD) {
+                sendRadioQueueChunksToServer(outbound, queueStateJson);
+                return;
+            }
+        }
         Balm.getNetworking().sendToServer(outbound);
     }
 
@@ -330,6 +384,26 @@ public class ModNetworking {
 
     public static void sendRadioState(ServerPlayer player, ClientboundRadioStateMessage message) {
         Balm.getNetworking().sendTo(player, message);
+    }
+
+    public static void sendRadioQueueStateChunks(ServerPlayer player, String radioId, long revision, String queueStateJson) {
+        if (player == null || queueStateJson == null || queueStateJson.isBlank()) {
+            return;
+        }
+        String transferId = java.util.UUID.randomUUID().toString();
+        int totalChunks = chunkCount(queueStateJson.length(), RADIO_QUEUE_CHUNK_SIZE);
+        for (int i = 0; i < totalChunks; i++) {
+            int start = i * RADIO_QUEUE_CHUNK_SIZE;
+            int end = Math.min(queueStateJson.length(), start + RADIO_QUEUE_CHUNK_SIZE);
+            Balm.getNetworking().sendTo(player, new ClientboundRadioQueueChunkMessage(
+                    transferId,
+                    radioId == null ? "" : radioId,
+                    Math.max(0L, revision),
+                    i,
+                    totalChunks,
+                    queueStateJson.substring(start, end)
+            ));
+        }
     }
 
     public static void sendSessionCommandResult(ServerPlayer player, ClientboundSessionCommandResultMessage message) {
@@ -349,6 +423,29 @@ public class ModNetworking {
 
     private static int chunkCount(int totalLength, int chunkSize) {
         return Math.max(1, (totalLength + chunkSize - 1) / chunkSize);
+    }
+
+    private static void sendRadioQueueChunksToServer(ServerboundRadioControlMessage message, String queueStateJson) {
+        if (message == null || queueStateJson == null || queueStateJson.isBlank()) {
+            return;
+        }
+        String transferId = java.util.UUID.randomUUID().toString();
+        int totalChunks = chunkCount(queueStateJson.length(), RADIO_QUEUE_CHUNK_SIZE);
+        for (int i = 0; i < totalChunks; i++) {
+            int start = i * RADIO_QUEUE_CHUNK_SIZE;
+            int end = Math.min(queueStateJson.length(), start + RADIO_QUEUE_CHUNK_SIZE);
+            Balm.getNetworking().sendToServer(new ServerboundRadioQueueChunkMessage(
+                    message.blockPos(),
+                    message.radioId(),
+                    message.context(),
+                    transferId,
+                    i,
+                    totalChunks,
+                    queueStateJson.substring(start, end),
+                    message.knownRevision(),
+                    message.commandId()
+            ));
+        }
     }
 
     private static long nextCommandId() {

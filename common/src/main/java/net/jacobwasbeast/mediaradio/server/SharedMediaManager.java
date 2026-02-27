@@ -11,6 +11,7 @@ import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSessionCommandResultMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
+import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioQueueChunkMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -31,6 +32,7 @@ import java.net.URISyntaxException;
 
 public class SharedMediaManager {
     private static final long CHUNK_TTL_MS = 30_000L;
+    private static final long QUEUE_CHUNK_DISPATCH_TTL_MS = 600_000L;
     private static final long COMMAND_DEDUPE_WINDOW_MS = 30_000L;
     private static final int MAX_QUEUE_STATE_RADIO_PACKET = 30_000;
     private static final int HANDHELD_PERIODIC_SYNC_INTERVAL_TICKS = 40;
@@ -44,6 +46,8 @@ public class SharedMediaManager {
     private static final String RUNTIME_SCOPE_BLOCK = "block";
     private static final Gson GSON = new Gson();
     private static final Map<String, ChunkAccumulator> CHUNK_UPLOADS = new HashMap<>();
+    private static final Map<String, QueueControlChunkAccumulator> QUEUE_CONTROL_CHUNKS = new HashMap<>();
+    private static final Map<String, QueueChunkDispatchState> LAST_SENT_QUEUE_CHUNK_STATE = new HashMap<>();
     private static final Map<String, HandheldListenerContext> ACTIVE_HANDHELD_LISTENER_CONTEXTS = new HashMap<>();
     private static final Map<String, Long> RECENT_SESSION_COMMANDS = new HashMap<>();
 
@@ -120,6 +124,48 @@ public class SharedMediaManager {
         }
 
         handleClientSnapshotUpload(player, json);
+    }
+
+    public static void handleRadioQueueChunk(ServerPlayer player, ServerboundRadioQueueChunkMessage message) {
+        if (player == null || message == null) {
+            return;
+        }
+        String transferId = safe(message.transferId());
+        String chunkData = message.chunkData();
+        if (transferId.isBlank() || chunkData == null) {
+            return;
+        }
+        if (message.totalChunks() <= 0 || message.totalChunks() > 512 || message.chunkIndex() < 0 || message.chunkIndex() >= message.totalChunks()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        String key = player.getUUID() + "|" + transferId;
+        String queueStateJson;
+        ServerboundRadioControlMessage outboundMessage;
+        synchronized (QUEUE_CONTROL_CHUNKS) {
+            QUEUE_CONTROL_CHUNKS.entrySet().removeIf(entry -> now - entry.getValue().createdAtMs > CHUNK_TTL_MS);
+            QueueControlChunkAccumulator accumulator = QUEUE_CONTROL_CHUNKS.computeIfAbsent(
+                    key,
+                    ignored -> new QueueControlChunkAccumulator(message, now)
+            );
+            if (!accumulator.matches(message)) {
+                QUEUE_CONTROL_CHUNKS.remove(key);
+                return;
+            }
+            if (!accumulator.accept(message.chunkIndex(), chunkData, SharedMediaSnapshot.MAX_JSON_LENGTH)) {
+                QUEUE_CONTROL_CHUNKS.remove(key);
+                return;
+            }
+            if (!accumulator.complete()) {
+                return;
+            }
+            queueStateJson = accumulator.join();
+            outboundMessage = accumulator.toControlMessage(queueStateJson);
+            QUEUE_CONTROL_CHUNKS.remove(key);
+        }
+
+        handleRadioControl(player, outboundMessage);
     }
 
     public static void handleRadioControl(ServerPlayer player, ServerboundRadioControlMessage message) {
@@ -464,23 +510,7 @@ public class SharedMediaManager {
             runtimeData.setDirty();
             syncLoadedBlockEntitiesForRadioId(radioId);
         }
-        long position = runtimeData.currentPositionMs(state);
-        ModNetworking.sendRadioState(player, new ClientboundRadioStateMessage(
-                radioId,
-                safe(state.sessionId),
-                Math.max(0L, state.revision),
-                safe(state.url),
-                safe(state.title),
-                safe(state.artist),
-                safe(state.thumbnail),
-                queueStateForPacket(state.queueStateJson),
-                Mth.clamp(state.volume, 0f, 2f),
-                position,
-                System.currentTimeMillis(),
-                true,
-                false,
-                state.playing
-        ));
+        sendRuntimeStatePacket(player, radioId, runtimeData, state, true, false);
     }
 
     public static void applyRuntimeStateToBlockEntity(RadioBlockEntity radioBlockEntity) {
@@ -1630,47 +1660,14 @@ public class SharedMediaManager {
         }
 
         boolean contextActive = shouldBroadcastHandheldContext(owner, radioId, state);
-        long position = runtimeData.currentPositionMs(state);
-        String queueForPacket = queueStateForPacket(state.queueStateJson);
-        long sentAtMs = System.currentTimeMillis();
-        ModNetworking.sendRadioState(owner, new ClientboundRadioStateMessage(
-                radioId,
-                safe(state.sessionId),
-                Math.max(0L, state.revision),
-                safe(state.url),
-                safe(state.title),
-                safe(state.artist),
-                safe(state.thumbnail),
-                queueForPacket,
-                Mth.clamp(state.volume, 0f, 2f),
-                position,
-                sentAtMs,
-                forcePositionSync,
-                seekEvent,
-                state.playing
-        ));
+        sendRuntimeStatePacket(owner, radioId, runtimeData, state, forcePositionSync, seekEvent);
         for (ServerPlayer other : owner.server.getPlayerList().getPlayers()) {
             if (!shouldBroadcastToHandheldListener(owner, other)) {
                 continue;
             }
             boolean inventoryPlayback = contextActive && isInventoryPlaybackContext(owner, radioId);
             ModNetworking.sendPlayerRadioContext(other, radioId, owner.getId(), contextActive, inventoryPlayback);
-            ModNetworking.sendRadioState(other, new ClientboundRadioStateMessage(
-                    radioId,
-                    safe(state.sessionId),
-                    Math.max(0L, state.revision),
-                    safe(state.url),
-                    safe(state.title),
-                    safe(state.artist),
-                    safe(state.thumbnail),
-                    queueForPacket,
-                    Mth.clamp(state.volume, 0f, 2f),
-                    position,
-                    sentAtMs,
-                    forcePositionSync,
-                    seekEvent,
-                    state.playing
-            ));
+            sendRuntimeStatePacket(other, radioId, runtimeData, state, forcePositionSync, seekEvent);
         }
     }
 
@@ -1721,6 +1718,7 @@ public class SharedMediaManager {
         if (target == null || runtimeData == null || state == null || safe(radioId).isBlank()) {
             return;
         }
+        String queueStateJson = safe(state.queueStateJson);
         long position = runtimeData.currentPositionMs(state);
         ModNetworking.sendRadioState(target, new ClientboundRadioStateMessage(
                 radioId,
@@ -1730,7 +1728,7 @@ public class SharedMediaManager {
                 safe(state.title),
                 safe(state.artist),
                 safe(state.thumbnail),
-                queueStateForPacket(state.queueStateJson),
+                queueStateForPacket(queueStateJson),
                 Mth.clamp(state.volume, 0f, 2f),
                 position,
                 System.currentTimeMillis(),
@@ -1738,6 +1736,43 @@ public class SharedMediaManager {
                 seekEvent,
                 state.playing
         ));
+        if (shouldSendPagedQueueState(target, radioId, queueStateJson, forcePositionSync)) {
+            ModNetworking.sendRadioQueueStateChunks(target, radioId, Math.max(0L, state.revision), queueStateJson);
+        }
+    }
+
+    private static boolean shouldSendPagedQueueState(
+            ServerPlayer target,
+            String radioId,
+            String queueStateJson,
+            boolean forceResend
+    ) {
+        String queueJson = safe(queueStateJson);
+        String key = queueDispatchKey(target, radioId);
+        if (queueJson.isBlank() || queueJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET) {
+            synchronized (LAST_SENT_QUEUE_CHUNK_STATE) {
+                LAST_SENT_QUEUE_CHUNK_STATE.remove(key);
+            }
+            return false;
+        }
+        int queueHash = queueJson.hashCode();
+        long now = System.currentTimeMillis();
+        synchronized (LAST_SENT_QUEUE_CHUNK_STATE) {
+            LAST_SENT_QUEUE_CHUNK_STATE.entrySet().removeIf(entry -> now - entry.getValue().sentAtMs > QUEUE_CHUNK_DISPATCH_TTL_MS);
+            QueueChunkDispatchState lastState = LAST_SENT_QUEUE_CHUNK_STATE.get(key);
+            if (!forceResend && lastState != null && lastState.queueHash == queueHash) {
+                return false;
+            }
+            LAST_SENT_QUEUE_CHUNK_STATE.put(key, new QueueChunkDispatchState(queueHash, now));
+            return true;
+        }
+    }
+
+    private static String queueDispatchKey(ServerPlayer player, String radioId) {
+        if (player == null) {
+            return "";
+        }
+        return player.getUUID() + "|" + safe(radioId);
     }
 
     private static void syncActiveHandheldRadiosToPlayer(ServerPlayer target) {
@@ -1765,22 +1800,7 @@ public class SharedMediaManager {
                 }
                 boolean inventoryPlayback = isInventoryPlaybackContext(owner, radioId);
                 ModNetworking.sendPlayerRadioContext(target, radioId, owner.getId(), true, inventoryPlayback);
-                ModNetworking.sendRadioState(target, new ClientboundRadioStateMessage(
-                        radioId,
-                        safe(state.sessionId),
-                        Math.max(0L, state.revision),
-                        safe(state.url),
-                        safe(state.title),
-                        safe(state.artist),
-                        safe(state.thumbnail),
-                        queueStateForPacket(state.queueStateJson),
-                        Mth.clamp(state.volume, 0f, 2f),
-                        runtimeData.currentPositionMs(state),
-                        System.currentTimeMillis(),
-                        true,
-                        false,
-                        state.playing
-                ));
+                sendRuntimeStatePacket(target, radioId, runtimeData, state, true, false);
             }
         }
     }
@@ -1813,9 +1833,6 @@ public class SharedMediaManager {
                 if (!shouldBroadcastHandheldContext(owner, radioId, state)) {
                     continue;
                 }
-                long position = runtimeData.currentPositionMs(state);
-                String queueForPacket = queueStateForPacket(state.queueStateJson);
-                long sentAtMs = System.currentTimeMillis();
                 for (ServerPlayer listener : players) {
                     if (!shouldBroadcastToHandheldListener(owner, listener)) {
                         continue;
@@ -1825,22 +1842,7 @@ public class SharedMediaManager {
                     boolean inventoryPlayback = isInventoryPlaybackContext(owner, radioId);
                     ModNetworking.sendPlayerRadioContext(listener, radioId, owner.getId(), true, inventoryPlayback);
                     boolean firstContextSync = !ACTIVE_HANDHELD_LISTENER_CONTEXTS.containsKey(contextKey);
-                    ModNetworking.sendRadioState(listener, new ClientboundRadioStateMessage(
-                            radioId,
-                            safe(state.sessionId),
-                            Math.max(0L, state.revision),
-                            safe(state.url),
-                            safe(state.title),
-                            safe(state.artist),
-                            safe(state.thumbnail),
-                            queueForPacket,
-                            Mth.clamp(state.volume, 0f, 2f),
-                            position,
-                            sentAtMs,
-                            firstContextSync,
-                            false,
-                            state.playing
-                    ));
+                    sendRuntimeStatePacket(listener, radioId, runtimeData, state, firstContextSync, false);
                     ACTIVE_HANDHELD_LISTENER_CONTEXTS.put(contextKey, new HandheldListenerContext(listener.getUUID(), radioId));
                 }
             }
@@ -2636,6 +2638,100 @@ public class SharedMediaManager {
         NONE,
         ONE,
         ALL
+    }
+
+    private static class QueueControlChunkAccumulator {
+        private final BlockPos blockPos;
+        private final String radioId;
+        private final ServerboundRadioControlMessage.Context context;
+        private final long knownRevision;
+        private final long commandId;
+        private final int totalChunks;
+        private final String[] chunks;
+        private final long createdAtMs;
+        private int received;
+        private int totalLength;
+
+        private QueueControlChunkAccumulator(ServerboundRadioQueueChunkMessage message, long createdAtMs) {
+            this.blockPos = message.blockPos();
+            this.radioId = safe(message.radioId());
+            this.context = message.context() == null ? ServerboundRadioControlMessage.Context.BLOCK : message.context();
+            this.knownRevision = message.knownRevision();
+            this.commandId = message.commandId();
+            this.totalChunks = message.totalChunks();
+            this.chunks = new String[this.totalChunks];
+            this.createdAtMs = createdAtMs;
+        }
+
+        private boolean matches(ServerboundRadioQueueChunkMessage message) {
+            if (message == null) {
+                return false;
+            }
+            ServerboundRadioControlMessage.Context incomingContext = message.context() == null
+                    ? ServerboundRadioControlMessage.Context.BLOCK
+                    : message.context();
+            return totalChunks == message.totalChunks()
+                    && knownRevision == message.knownRevision()
+                    && commandId == message.commandId()
+                    && Objects.equals(blockPos, message.blockPos())
+                    && safe(radioId).equals(safe(message.radioId()))
+                    && context == incomingContext;
+        }
+
+        private boolean accept(int index, String chunk, int maxLength) {
+            if (index < 0 || index >= totalChunks) {
+                return false;
+            }
+            if (chunks[index] != null) {
+                return true;
+            }
+            chunks[index] = chunk;
+            received++;
+            totalLength += chunk.length();
+            return totalLength <= maxLength;
+        }
+
+        private boolean complete() {
+            return received == totalChunks;
+        }
+
+        private String join() {
+            StringBuilder builder = new StringBuilder(totalLength);
+            for (String chunk : chunks) {
+                if (chunk != null) {
+                    builder.append(chunk);
+                }
+            }
+            return builder.toString();
+        }
+
+        private ServerboundRadioControlMessage toControlMessage(String queueStateJson) {
+            return new ServerboundRadioControlMessage(
+                    blockPos,
+                    radioId,
+                    context,
+                    ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
+                    safe(queueStateJson),
+                    "",
+                    "",
+                    "",
+                    0f,
+                    0L,
+                    -1L,
+                    knownRevision,
+                    commandId
+            );
+        }
+    }
+
+    private static class QueueChunkDispatchState {
+        private final int queueHash;
+        private final long sentAtMs;
+
+        private QueueChunkDispatchState(int queueHash, long sentAtMs) {
+            this.queueHash = queueHash;
+            this.sentAtMs = sentAtMs;
+        }
     }
 
     private static class ChunkAccumulator {

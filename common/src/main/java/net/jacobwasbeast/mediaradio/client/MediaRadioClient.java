@@ -26,9 +26,14 @@ import net.jacobwasbeast.mediaradio.registry.ModItems;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
 import net.jacobwasbeast.mediaradio.server.SharedMediaSnapshot;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class MediaRadioClient {
+    private static final long RADIO_QUEUE_CHUNK_TTL_MS = 30_000L;
+    private static final Map<String, RadioQueueChunkAccumulator> RADIO_QUEUE_CHUNKS = new HashMap<>();
+
     public static void initialize() {
         ModKeyMappings.initialize();
         ClientMediaRepository.initialize();
@@ -50,6 +55,9 @@ public class MediaRadioClient {
                     ClientAudioEngine.getInstance().stopAll();
                     ThumbnailTextureManager.getInstance().clearSessionCache();
                     ClientMediaRepository.getInstance().resetAndReloadCache();
+                    synchronized (RADIO_QUEUE_CHUNKS) {
+                        RADIO_QUEUE_CHUNKS.clear();
+                    }
                 });
     }
 
@@ -173,6 +181,56 @@ public class MediaRadioClient {
         );
     }
 
+    public static void applyServerRadioQueueStateChunk(
+            String radioId,
+            long revision,
+            String transferId,
+            int chunkIndex,
+            int totalChunks,
+            String chunkData
+    ) {
+        String resolvedRadioId = radioId == null ? "" : radioId;
+        if (resolvedRadioId.isBlank() || transferId == null || transferId.isBlank() || chunkData == null) {
+            return;
+        }
+        if (totalChunks <= 0 || totalChunks > 512 || chunkIndex < 0 || chunkIndex >= totalChunks) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        String completeQueueJson;
+        synchronized (RADIO_QUEUE_CHUNKS) {
+            RADIO_QUEUE_CHUNKS.entrySet().removeIf(entry -> now - entry.getValue().createdAtMs > RADIO_QUEUE_CHUNK_TTL_MS);
+            RadioQueueChunkAccumulator accumulator = RADIO_QUEUE_CHUNKS.computeIfAbsent(
+                    transferId,
+                    ignored -> new RadioQueueChunkAccumulator(resolvedRadioId, revision, totalChunks, now)
+            );
+            if (!accumulator.matches(resolvedRadioId, revision, totalChunks)) {
+                RADIO_QUEUE_CHUNKS.remove(transferId);
+                return;
+            }
+            if (!accumulator.accept(chunkIndex, chunkData, SharedMediaSnapshot.MAX_JSON_LENGTH)) {
+                RADIO_QUEUE_CHUNKS.remove(transferId);
+                return;
+            }
+            if (!accumulator.complete()) {
+                return;
+            }
+            completeQueueJson = accumulator.join();
+            RADIO_QUEUE_CHUNKS.remove(transferId);
+        }
+
+        ClientMediaRepository repository = ClientMediaRepository.getInstance();
+        String previousActive = repository.getActiveRadioId();
+        if (!resolvedRadioId.equals(previousActive)) {
+            repository.setActiveRadioId(resolvedRadioId);
+        }
+        repository.importActiveQueueStateJson(completeQueueJson);
+        if (!resolvedRadioId.equals(previousActive)) {
+            repository.setActiveRadioId(previousActive);
+        }
+    }
+
     public static void applyServerPlayerRadioContext(String radioId, int entityId, boolean active, boolean inventoryPlayback) {
         if (radioId == null || radioId.isBlank()) {
             return;
@@ -250,5 +308,56 @@ public class MediaRadioClient {
             return 1f;
         }
         return ItemStack.isSameItemSameTags(main, stack) ? 1f : 0f;
+    }
+
+    private static class RadioQueueChunkAccumulator {
+        private final String radioId;
+        private final long revision;
+        private final int totalChunks;
+        private final String[] chunks;
+        private final long createdAtMs;
+        private int received;
+        private int totalLength;
+
+        private RadioQueueChunkAccumulator(String radioId, long revision, int totalChunks, long createdAtMs) {
+            this.radioId = radioId;
+            this.revision = revision;
+            this.totalChunks = totalChunks;
+            this.chunks = new String[totalChunks];
+            this.createdAtMs = createdAtMs;
+        }
+
+        private boolean matches(String radioId, long revision, int totalChunks) {
+            return this.totalChunks == totalChunks
+                    && this.revision == revision
+                    && this.radioId.equals(radioId == null ? "" : radioId);
+        }
+
+        private boolean accept(int index, String chunk, int maxLength) {
+            if (index < 0 || index >= totalChunks) {
+                return false;
+            }
+            if (chunks[index] != null) {
+                return true;
+            }
+            chunks[index] = chunk;
+            received++;
+            totalLength += chunk.length();
+            return totalLength <= maxLength;
+        }
+
+        private boolean complete() {
+            return received == totalChunks;
+        }
+
+        private String join() {
+            StringBuilder builder = new StringBuilder(totalLength);
+            for (String chunk : chunks) {
+                if (chunk != null) {
+                    builder.append(chunk);
+                }
+            }
+            return builder.toString();
+        }
     }
 }

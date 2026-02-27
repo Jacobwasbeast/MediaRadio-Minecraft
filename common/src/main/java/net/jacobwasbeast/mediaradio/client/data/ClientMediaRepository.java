@@ -720,20 +720,10 @@ public class ClientMediaRepository {
 
         QueueStatePayload compactPayload = buildQueueStatePayload(queueState, true);
         String compactJson = gson.toJson(compactPayload);
-        if (compactJson.length() <= WIRE_SAFE_QUEUE_STATE_MAX) {
+        if (!compactJson.isBlank()) {
             return compactJson;
         }
-
-        QueueStatePayload trimmedFullPayload = trimPayloadToWireLimit(fullPayload);
-        QueueStatePayload trimmedCompactPayload = trimPayloadToWireLimit(compactPayload);
-        QueueStatePayload preferred = preferredPayload(trimmedFullPayload, trimmedCompactPayload);
-        String preferredJson = gson.toJson(preferred);
-        if (preferredJson.length() <= WIRE_SAFE_QUEUE_STATE_MAX) {
-            return preferredJson;
-        }
-
-        QueueStatePayload trimmedPayload = trimPayloadToWireLimit(compactPayload);
-        return gson.toJson(trimmedPayload);
+        return fullJson;
     }
 
     private QueueStatePayload preferredPayload(QueueStatePayload first, QueueStatePayload second) {
