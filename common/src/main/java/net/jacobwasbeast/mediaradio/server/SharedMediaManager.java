@@ -2511,9 +2511,15 @@ public class SharedMediaManager {
         if (compactJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET) {
             return compactJson;
         }
-        QueueStatePayload trimmed = trimQueuePayloadForPacket(compact, MAX_QUEUE_STATE_RADIO_PACKET);
-        String trimmedJson = GSON.toJson(trimmed);
-        return trimmedJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET ? trimmedJson : "";
+        QueueStatePayload summarized = summarizeQueuePayloadForPacket(compact);
+        String summarizedJson = GSON.toJson(summarized);
+        if (summarizedJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET) {
+            return summarizedJson;
+        }
+        QueueStatePayload fallback = new QueueStatePayload();
+        fallback.partial = true;
+        String fallbackJson = GSON.toJson(fallback);
+        return fallbackJson.length() <= MAX_QUEUE_STATE_RADIO_PACKET ? fallbackJson : "";
     }
 
     private static QueueStatePayload compactQueuePayload(QueueStatePayload payload) {
@@ -2577,6 +2583,46 @@ public class SharedMediaManager {
         }
         alignQueuePointer(trimmed);
         return trimmed;
+    }
+
+    private static QueueStatePayload summarizeQueuePayloadForPacket(QueueStatePayload payload) {
+        QueueStatePayload summary = new QueueStatePayload();
+        if (payload == null) {
+            summary.partial = true;
+            return summary;
+        }
+        summary.loopMode = payload.loopMode == null ? QueueLoopMode.ALL : payload.loopMode;
+        summary.partial = true;
+        if (payload.entries == null || payload.entries.isEmpty()) {
+            return summary;
+        }
+
+        String currentId = safe(payload.currentQueueItemId);
+        int chosenIndex = -1;
+        if (!currentId.isBlank()) {
+            for (int i = 0; i < payload.entries.size(); i++) {
+                QueueMediaPayload entry = payload.entries.get(i);
+                if (entry != null && currentId.equals(safe(entry.queueItemId))) {
+                    chosenIndex = i;
+                    break;
+                }
+            }
+        }
+        if (chosenIndex < 0) {
+            chosenIndex = Math.max(0, Math.min(payload.queueIndex, payload.entries.size() - 1));
+        }
+        QueueMediaPayload chosen = payload.entries.get(chosenIndex);
+        if (chosen == null || safe(chosen.url).isBlank()) {
+            return summary;
+        }
+        QueueMediaPayload copy = new QueueMediaPayload();
+        copy.queueItemId = safe(chosen.queueItemId);
+        copy.url = safe(chosen.url);
+        copy.durationMs = sanitizeDurationMs(chosen.durationMs);
+        summary.entries.add(copy);
+        summary.currentQueueItemId = copy.queueItemId;
+        summary.queueIndex = 0;
+        return summary;
     }
 
     private static void alignQueuePointer(QueueStatePayload payload) {
