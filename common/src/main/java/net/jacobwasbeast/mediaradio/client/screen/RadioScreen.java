@@ -48,6 +48,7 @@ public class RadioScreen extends Screen {
     private static final int SOURCE_ROW_HEIGHT = 34;
     private static final int SOURCE_THUMB_SIZE = 30;
     private static final int YOUTUBE_PLAYLIST_IMPORT_BATCH_SIZE = 64;
+    private static final long BLOCK_QUEUE_IMPORT_GRACE_MS = 3_000L;
 
     private static final int COLOR_BG_TOP = 0xEC070A0D;
     private static final int COLOR_BG_BOTTOM = 0xF0010205;
@@ -124,6 +125,8 @@ public class RadioScreen extends Screen {
     private long timelinePreviewPositionMs = -1L;
     private long lastKnownDurationMs = -1L;
     private String lastPersistedQueueState = "";
+    private String pendingBlockQueueState = "";
+    private long pendingBlockQueueStateSetAtMs = 0L;
     private String lastPersistedRuntimeKey = "";
     private String lastBoundBlockRadioId = "";
     private final List<LavaPlayerAccess.SearchResult> sourceSearchResults = new ArrayList<>();
@@ -1860,6 +1863,7 @@ public class RadioScreen extends Screen {
             selectedQueueIndex = Math.min(selectedQueueIndex, queueSize - 1);
         }
 
+        broadcastQueueStateNow();
         persistRuntimeState();
     }
 
@@ -1915,16 +1919,21 @@ public class RadioScreen extends Screen {
         }
         ClientMediaRepository.getInstance().moveQueueIndex(selectedQueueIndex, target);
         selectedQueueIndex = target;
+        broadcastQueueStateNow();
+        persistRuntimeState();
     }
 
     private void shuffleQueue() {
         ClientMediaRepository.getInstance().shuffleQueue();
         selectedQueueIndex = ClientMediaRepository.getInstance().getQueueIndex();
+        broadcastQueueStateNow();
+        persistRuntimeState();
     }
 
     private void cycleLoopMode() {
         ClientMediaRepository.getInstance().cycleLoopMode();
         updateLoopModeButtonLabel();
+        broadcastQueueStateNow();
         persistRuntimeState();
     }
 
@@ -2668,6 +2677,7 @@ public class RadioScreen extends Screen {
             if (!queueStateJson.equals(lastPersistedQueueState)) {
                 sendBlockRadioControl(ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE, queueStateJson, "", "", "", 0L);
                 lastPersistedQueueState = queueStateJson;
+                markPendingBlockQueueState(queueStateJson);
             }
             return;
         }
@@ -2714,6 +2724,7 @@ public class RadioScreen extends Screen {
             }
             if (!fixedBlockRadioId.equals(lastBoundBlockRadioId)) {
                 lastPersistedQueueState = "";
+                clearPendingBlockQueueState();
                 lastBoundBlockRadioId = fixedBlockRadioId;
                 ModNetworking.requestRadioState(fixedBlockRadioId, ServerboundRequestRadioStateMessage.Context.BLOCK);
             }
@@ -2736,11 +2747,18 @@ public class RadioScreen extends Screen {
         if (!radioId.equals(lastBoundBlockRadioId)) {
             repository.importActiveQueueStateJson(queueState);
             lastPersistedQueueState = queueState;
+            clearPendingBlockQueueState();
             lastBoundBlockRadioId = radioId;
             return;
         }
+        if (!pendingBlockQueueState.isBlank() && queueState.equals(pendingBlockQueueState)) {
+            clearPendingBlockQueueState();
+        }
         // Keep UI queue model aligned when server simulation advances this radio while no player owns it.
         if (!queueState.equals(lastPersistedQueueState)) {
+            if (shouldDeferBlockQueueImport(queueState)) {
+                return;
+            }
             repository.importActiveQueueStateJson(queueState);
             lastPersistedQueueState = queueState;
         }
@@ -2752,6 +2770,7 @@ public class RadioScreen extends Screen {
         if (isBlockMode()) {
             sendBlockRadioControl(ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE, queueStateJson, "", "", "", 0L);
             lastPersistedQueueState = queueStateJson;
+            markPendingBlockQueueState(queueStateJson);
             return;
         }
 
@@ -2840,6 +2859,7 @@ public class RadioScreen extends Screen {
                         0L
                 ));
                 lastPersistedQueueState = queueStateJson;
+                markPendingBlockQueueState(queueStateJson);
             }
         }
 
@@ -2850,6 +2870,35 @@ public class RadioScreen extends Screen {
         if (!fixedBlockRadioId.isBlank()) {
             ClientAudioEngine.getInstance().setExternalContext(fixedBlockRadioId, contraptionEntityId, contraptionLocalPos);
         }
+    }
+
+    private void markPendingBlockQueueState(String queueStateJson) {
+        if (!isBlockMode()) {
+            return;
+        }
+        pendingBlockQueueState = queueStateJson == null ? "" : queueStateJson;
+        pendingBlockQueueStateSetAtMs = System.currentTimeMillis();
+    }
+
+    private void clearPendingBlockQueueState() {
+        pendingBlockQueueState = "";
+        pendingBlockQueueStateSetAtMs = 0L;
+    }
+
+    private boolean shouldDeferBlockQueueImport(String incomingQueueState) {
+        if (pendingBlockQueueState.isBlank()) {
+            return false;
+        }
+        if (pendingBlockQueueState.equals(incomingQueueState)) {
+            clearPendingBlockQueueState();
+            return false;
+        }
+        long elapsedMs = System.currentTimeMillis() - pendingBlockQueueStateSetAtMs;
+        if (elapsedMs >= BLOCK_QUEUE_IMPORT_GRACE_MS) {
+            clearPendingBlockQueueState();
+            return false;
+        }
+        return true;
     }
 
     private String trim(String value, int maxLength) {
