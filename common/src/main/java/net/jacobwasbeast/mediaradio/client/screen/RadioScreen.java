@@ -1323,11 +1323,11 @@ public class RadioScreen extends Screen {
 
         switch (action) {
             case PLAY -> {
-                playEntry(entry, true);
+                playEntry(entry, true, selected.durationMs());
                 sourceStatusMessage = "Playing: " + trim(finalTitle, 34);
             }
             case QUEUE -> {
-                ClientMediaRepository.getInstance().enqueue(entry.id);
+                ClientMediaRepository.getInstance().enqueue(entry.id, selected.durationMs());
                 selectedQueueIndex = Math.max(0, ClientMediaRepository.getInstance().getQueueEntries().size() - 1);
                 sourceStatusMessage = "Queued: " + trim(finalTitle, 34);
             }
@@ -1929,11 +1929,15 @@ public class RadioScreen extends Screen {
     }
 
     private void playEntry(SharedMediaSnapshot.MediaEntry entry, boolean syncQueueSelection) {
+        playEntry(entry, syncQueueSelection, -1L);
+    }
+
+    private void playEntry(SharedMediaSnapshot.MediaEntry entry, boolean syncQueueSelection, long queueDurationMs) {
         if (entry == null || entry.url == null || entry.url.isBlank()) {
             return;
         }
         if (syncQueueSelection) {
-            ensureQueueCurrent(entry);
+            ensureQueueCurrent(entry, queueDurationMs);
         }
         if (isBlockMode()) {
             sendBlockRadioControl(
@@ -1952,6 +1956,10 @@ public class RadioScreen extends Screen {
     }
 
     private void ensureQueueCurrent(SharedMediaSnapshot.MediaEntry entry) {
+        ensureQueueCurrent(entry, -1L);
+    }
+
+    private void ensureQueueCurrent(SharedMediaSnapshot.MediaEntry entry, long durationMs) {
         if (entry == null || entry.id == null || entry.id.isBlank()) {
             return;
         }
@@ -1986,7 +1994,7 @@ public class RadioScreen extends Screen {
             selectedQueueIndex = matchedIndex;
             return;
         }
-        repository.enqueue(entry.id);
+        repository.enqueue(entry.id, durationMs);
         int newIndex = Math.max(0, repository.getQueueEntries().size() - 1);
         repository.setQueueIndex(newIndex);
         selectedQueueIndex = newIndex;
@@ -2802,9 +2810,10 @@ public class RadioScreen extends Screen {
             String thumbnail,
             long positionMs
     ) {
+        String targetRadioId = getTargetBlockRadioId();
         ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
                 blockPos,
-                getTargetBlockRadioId(),
+                targetRadioId,
                 action,
                 url,
                 title,
@@ -2815,14 +2824,13 @@ public class RadioScreen extends Screen {
         ));
 
         if (action == ServerboundRadioControlMessage.Action.PLAY_URL) {
-            String radioId = getTargetBlockRadioId();
-            String queueStateJson = radioId == null || radioId.isBlank()
+            String queueStateJson = targetRadioId == null || targetRadioId.isBlank()
                     ? ClientMediaRepository.getInstance().exportActiveQueueStateJson()
-                    : ClientMediaRepository.getInstance().exportQueueStateJsonForRadioId(radioId);
+                    : ClientMediaRepository.getInstance().exportQueueStateJsonForRadioId(targetRadioId);
             if (!queueStateJson.isBlank()) {
                 ModNetworking.sendBlockRadioControl(new ServerboundRadioControlMessage(
                         blockPos,
-                        radioId == null ? "" : radioId,
+                        targetRadioId == null ? "" : targetRadioId,
                         ServerboundRadioControlMessage.Action.UPDATE_QUEUE_STATE,
                         queueStateJson,
                         "",
@@ -2835,28 +2843,12 @@ public class RadioScreen extends Screen {
             }
         }
 
-        if (fixedBlockRadioId.isBlank()) {
-            return;
+        if (targetRadioId != null && !targetRadioId.isBlank()) {
+            ModNetworking.requestRadioState(targetRadioId, ServerboundRequestRadioStateMessage.Context.BLOCK);
         }
 
-        ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
-        audioEngine.setExternalContext(fixedBlockRadioId, contraptionEntityId, contraptionLocalPos);
-        switch (action) {
-            case PLAY_URL -> {
-                String displayTitle = title == null || title.isBlank() ? url : title;
-                audioEngine.playExternal(fixedBlockRadioId, url, Math.max(0L, positionMs), displayTitle, artist, thumbnail);
-            }
-            case UPDATE_METADATA -> audioEngine.updateExternalMetadata(fixedBlockRadioId, title, artist, thumbnail);
-            case TOGGLE_PAUSE -> audioEngine.togglePauseExternal(fixedBlockRadioId);
-            case STOP -> audioEngine.stopExternal(fixedBlockRadioId);
-            case SET_VOLUME -> audioEngine.setExternalVolume(fixedBlockRadioId, blockVolume);
-            case SEEK -> audioEngine.seekExternal(fixedBlockRadioId, positionMs);
-            case UPDATE_QUEUE_STATE -> {
-                // Queue state is already maintained in the shared client repository.
-            }
-            case SYNC_RUNTIME -> {
-                // Runtime sync is server-authoritative bookkeeping only.
-            }
+        if (!fixedBlockRadioId.isBlank()) {
+            ClientAudioEngine.getInstance().setExternalContext(fixedBlockRadioId, contraptionEntityId, contraptionLocalPos);
         }
     }
 

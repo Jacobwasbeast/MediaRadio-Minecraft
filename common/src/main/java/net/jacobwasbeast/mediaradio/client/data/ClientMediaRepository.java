@@ -460,12 +460,16 @@ public class ClientMediaRepository {
     }
 
     public synchronized void enqueue(String mediaId) {
+        enqueue(mediaId, -1L);
+    }
+
+    public synchronized void enqueue(String mediaId, long durationMs) {
         QueueState queueState = activeQueueState();
         if (!snapshot.library.containsKey(mediaId)) {
             return;
         }
 
-        QueueItem queueItem = new QueueItem(newQueueItemId(), mediaId);
+        QueueItem queueItem = new QueueItem(newQueueItemId(), mediaId, durationMs);
         queueState.queueItems.add(queueItem);
         if (queueState.currentQueueItemId.isBlank()) {
             queueState.currentQueueItemId = queueItem.queueItemId;
@@ -756,6 +760,7 @@ public class ClientMediaRepository {
             QueueMediaPayload mediaPayload = new QueueMediaPayload();
             mediaPayload.queueItemId = queueItem.queueItemId;
             mediaPayload.url = entry.url;
+            mediaPayload.durationMs = sanitizeDurationMs(queueItem.durationMs);
             if (!compact) {
                 mediaPayload.title = entry.title;
                 mediaPayload.artist = entry.artist;
@@ -863,6 +868,7 @@ public class ClientMediaRepository {
         copy.title = truncateForWire(safe(source == null ? "" : source.title), 256);
         copy.artist = truncateForWire(safe(source == null ? "" : source.artist), 256);
         copy.thumbnail = truncateForWire(safe(source == null ? "" : source.thumbnail), 1024);
+        copy.durationMs = sanitizeDurationMs(source == null ? -1L : source.durationMs);
         return copy;
     }
 
@@ -922,10 +928,14 @@ public class ClientMediaRepository {
                         true
                 );
                 String queueItemId = safeQueueItemId(queued.queueItemId);
+                long durationMs = sanitizeDurationMs(queued.durationMs);
                 if (mergePartialPayload && containsQueueItemId(queueState, queueItemId)) {
+                    if (durationMs > 0L) {
+                        updateQueueItemDuration(queueState, queueItemId, durationMs);
+                    }
                     continue;
                 }
-                queueState.queueItems.add(new QueueItem(queueItemId, entry.id));
+                queueState.queueItems.add(new QueueItem(queueItemId, entry.id, durationMs));
             }
         }
 
@@ -1100,6 +1110,7 @@ public class ClientMediaRepository {
                     QueueItemModel queueItemModel = new QueueItemModel();
                     queueItemModel.queueItemId = queueItem.queueItemId;
                     queueItemModel.mediaId = queueItem.mediaId;
+                    queueItemModel.durationMs = queueItem.durationMs;
                     queueModel.queueItems.add(queueItemModel);
                     queueModel.queueMediaIds.add(queueItem.mediaId);
                 }
@@ -1131,6 +1142,7 @@ public class ClientMediaRepository {
             if (queueItem.queueItemId == null || queueItem.queueItemId.isBlank() || seenQueueItemIds.contains(queueItem.queueItemId)) {
                 queueItem.queueItemId = newQueueItemId();
             }
+            queueItem.durationMs = sanitizeDurationMs(queueItem.durationMs);
             seenQueueItemIds.add(queueItem.queueItemId);
         }
 
@@ -1174,6 +1186,23 @@ public class ClientMediaRepository {
         return overlap;
     }
 
+    private void updateQueueItemDuration(QueueState queueState, String queueItemId, long durationMs) {
+        if (queueState == null || queueState.queueItems == null) {
+            return;
+        }
+        long sanitizedDurationMs = sanitizeDurationMs(durationMs);
+        if (sanitizedDurationMs <= 0L) {
+            return;
+        }
+        for (QueueItem queueItem : queueState.queueItems) {
+            if (queueItem == null || !queueItemId.equals(queueItem.queueItemId)) {
+                continue;
+            }
+            queueItem.durationMs = sanitizedDurationMs;
+            return;
+        }
+    }
+
     private int findCurrentQueueIndex(QueueState queueState) {
         if (queueState.queueItems.isEmpty()) {
             return -1;
@@ -1210,7 +1239,8 @@ public class ClientMediaRepository {
                 }
                 queueState.queueItems.add(new QueueItem(
                         safeQueueItemId(queueItemModel.queueItemId),
-                        queueItemModel.mediaId
+                        queueItemModel.mediaId,
+                        queueItemModel.durationMs
                 ));
             }
         } else if (model.queueMediaIds != null) {
@@ -1328,6 +1358,13 @@ public class ClientMediaRepository {
         return safeValue.substring(0, maxLength);
     }
 
+    private static long sanitizeDurationMs(long value) {
+        if (value <= 0L || value == Long.MAX_VALUE) {
+            return -1L;
+        }
+        return value;
+    }
+
     private Path getCacheFile() {
         return Minecraft.getInstance().gameDirectory.toPath().resolve("config").resolve("mediaradio-client-cache.json");
     }
@@ -1341,10 +1378,16 @@ public class ClientMediaRepository {
     private static class QueueItem {
         private String queueItemId;
         private final String mediaId;
+        private long durationMs;
 
         private QueueItem(String queueItemId, String mediaId) {
+            this(queueItemId, mediaId, -1L);
+        }
+
+        private QueueItem(String queueItemId, String mediaId, long durationMs) {
             this.queueItemId = queueItemId;
             this.mediaId = mediaId;
+            this.durationMs = sanitizeDurationMs(durationMs);
         }
     }
 
@@ -1368,6 +1411,7 @@ public class ClientMediaRepository {
     private static class QueueItemModel {
         private String queueItemId;
         private String mediaId;
+        private long durationMs = -1L;
     }
 
     private static class RadioStateModel {
@@ -1391,6 +1435,7 @@ public class ClientMediaRepository {
         private String title = "";
         private String artist = "";
         private String thumbnail = "";
+        private long durationMs = -1L;
     }
 
     public record PlaylistImportTrack(

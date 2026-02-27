@@ -109,6 +109,9 @@ public class MediaRadioClient {
         }
         boolean isActiveRadio = radioId.equals(repository.getActiveRadioId());
         ClientAudioEngine audioEngine = ClientAudioEngine.getInstance();
+        if (!audioEngine.shouldAcceptRuntimePacket(radioId)) {
+            return;
+        }
         boolean isExternalRadio = audioEngine.hasExternalContext(radioId);
 
         boolean hasAuthoritativeQueueState = queueStateJson != null && !queueStateJson.isBlank();

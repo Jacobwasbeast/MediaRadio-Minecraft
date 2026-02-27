@@ -8,7 +8,6 @@ import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaChunkM
 import net.jacobwasbeast.mediaradio.network.message.ClientboundPlayerRadioContextMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundRadioStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundOpenContraptionRadioMessage;
-import net.jacobwasbeast.mediaradio.network.message.ServerboundHandheldStateMessage;
 import net.jacobwasbeast.mediaradio.network.message.ClientboundSharedMediaMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRadioControlMessage;
 import net.jacobwasbeast.mediaradio.network.message.ServerboundRequestRadioStateMessage;
@@ -222,14 +221,6 @@ public class ModNetworking {
         );
 
         networking.registerServerboundPacket(
-                MediaRadio.id("handheld_state"),
-                ServerboundHandheldStateMessage.class,
-                ServerboundHandheldStateMessage::encode,
-                ServerboundHandheldStateMessage::new,
-                SharedMediaManager::handleHandheldState
-        );
-
-        networking.registerServerboundPacket(
                 MediaRadio.id("radio_state_request"),
                 ServerboundRequestRadioStateMessage.class,
                 ServerboundRequestRadioStateMessage::encode,
@@ -322,32 +313,6 @@ public class ModNetworking {
                     outbound.volume(),
                     outbound.positionMs(),
                     outbound.trackDurationMs(),
-                    outbound.knownRevision(),
-                    nextCommandId()
-            );
-        }
-        Balm.getNetworking().sendToServer(outbound);
-    }
-
-    public static void sendHandheldState(ServerboundHandheldStateMessage message) {
-        if (message == null) {
-            return;
-        }
-        ServerboundHandheldStateMessage outbound = message;
-        if (outbound.commandId() < 0L) {
-            outbound = new ServerboundHandheldStateMessage(
-                    outbound.radioId(),
-                    outbound.url(),
-                    outbound.title(),
-                    outbound.artist(),
-                    outbound.thumbnail(),
-                    outbound.queueStateJson(),
-                    outbound.volume(),
-                    outbound.positionMs(),
-                    outbound.trackDurationMs(),
-                    outbound.seekSerial(),
-                    outbound.playing(),
-                    outbound.allowInventoryBroadcast(),
                     outbound.knownRevision(),
                     nextCommandId()
             );
