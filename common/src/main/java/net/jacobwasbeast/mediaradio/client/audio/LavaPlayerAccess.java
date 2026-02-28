@@ -16,6 +16,14 @@ import com.sedmelluq.discord.lavaplayer.track.AudioPlaylist;
 import com.sedmelluq.discord.lavaplayer.track.AudioTrack;
 import com.sedmelluq.discord.lavaplayer.track.AudioTrackInfo;
 import dev.lavalink.youtube.YoutubeAudioSourceManager;
+import dev.lavalink.youtube.clients.ClientOptions;
+import dev.lavalink.youtube.clients.skeleton.Client;
+import dev.lavalink.youtube.clients.AndroidVrWithThumbnail;
+import dev.lavalink.youtube.clients.MWebWithThumbnail;
+import dev.lavalink.youtube.clients.MusicWithThumbnail;
+import dev.lavalink.youtube.clients.TvHtml5SimplyWithThumbnail;
+import dev.lavalink.youtube.clients.WebEmbeddedWithThumbnail;
+import dev.lavalink.youtube.clients.WebWithThumbnail;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 
 import javax.sound.sampled.AudioInputStream;
@@ -399,14 +407,43 @@ public class LavaPlayerAccess {
 
     private void tryRegisterYoutubeSource(AudioPlayerManager manager) {
         try {
-            // Exact same construction style as IamMusicPlayer_FIX-1.20.1.
-            YoutubeAudioSourceManager sourceManager = new YoutubeAudioSourceManager();
+            Client[] clients = createYoutubeClients();
+            YoutubeAudioSourceManager sourceManager = new YoutubeAudioSourceManager(clients);
             // Default page count can truncate larger playlists (~120 tracks).
             sourceManager.setPlaylistPageCount(YOUTUBE_PLAYLIST_PAGE_COUNT);
             manager.registerSourceManager((AudioSourceManager) sourceManager);
+            logYoutubeClientConfiguration(sourceManager);
         } catch (Exception exception) {
             MediaRadio.LOGGER.warn("YouTube source manager not available, YouTube playback may fail", exception);
         }
+    }
+
+    private Client[] createYoutubeClients() {
+        ClientOptions webOptions = ClientOptions.DEFAULT.copy();
+        // Keep WEB clients for search/metadata fallback, but avoid their unstable playback path.
+        webOptions.setPlayback(false);
+        return new Client[]{
+                new MusicWithThumbnail(),
+                new AndroidVrWithThumbnail(),
+                new MWebWithThumbnail(),
+                new TvHtml5SimplyWithThumbnail(),
+                new WebWithThumbnail(webOptions),
+                new WebEmbeddedWithThumbnail(webOptions)
+        };
+    }
+
+    private void logYoutubeClientConfiguration(YoutubeAudioSourceManager sourceManager) {
+        StringBuilder builder = new StringBuilder();
+        for (Client client : sourceManager.getClients()) {
+            if (client == null) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append(", ");
+            }
+            builder.append(client.getIdentifier());
+        }
+        MediaRadio.LOGGER.info("Configured YouTube clients: {}", builder);
     }
 
     private void registerNonYoutubeRemoteSources(AudioPlayerManager manager) {

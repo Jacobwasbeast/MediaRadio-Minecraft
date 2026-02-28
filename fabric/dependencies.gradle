@@ -37,5 +37,5 @@ dependencies {
     shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
         exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
     }
-    shadowIn("dev.lavalink.youtube:v2:1.17.0")
+    shadowIn("dev.lavalink.youtube:v2:1.18.0")
 }

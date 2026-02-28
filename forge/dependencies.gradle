@@ -11,11 +11,11 @@ dependencies {
     shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
         exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
     }
-    shadowIn("dev.lavalink.youtube:v2:1.17.0")
+    shadowIn("dev.lavalink.youtube:v2:1.18.0")
 
     // Ensure LegacyForge dev runs include these on clientLegacyClasspath.
     // Without this, Forge can miss Lavaplayer classes/natives at runtime.
     additionalRuntimeClasspath("dev.arbjerg:lavaplayer:2.2.6")
     additionalRuntimeClasspath("dev.arbjerg:lavaplayer-natives:2.2.6")
-    additionalRuntimeClasspath("dev.lavalink.youtube:v2:1.17.0")
+    additionalRuntimeClasspath("dev.lavalink.youtube:v2:1.18.0")
 }
