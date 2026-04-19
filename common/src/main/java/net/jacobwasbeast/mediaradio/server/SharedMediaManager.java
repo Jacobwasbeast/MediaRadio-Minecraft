@@ -1005,7 +1005,18 @@ public class SharedMediaManager {
         if (runtimeData == null || state == null || !state.playing) {
             return;
         }
-        state.positionMs = runtimeData.currentPositionMs(state);
+        long projected = runtimeData.currentPositionMs(state);
+        // If a radio was left playing long enough that the projected position runs past the track
+        // end without any advance path firing (no viewer, no resolvable queue, unknown duration),
+        // clamp it into a clean stopped state so the next screen open doesn't report phantom
+        // "playing past the end" — which otherwise shows up as a UI stuck between pausing and stopping.
+        if (state.trackDurationMs > 0L && projected > state.trackDurationMs + TRACK_END_EPSILON_MS) {
+            state.playing = false;
+            state.positionMs = 0L;
+            state.updatedAtMs = Math.max(0L, nowMs);
+            return;
+        }
+        state.positionMs = projected;
         state.updatedAtMs = Math.max(0L, nowMs);
     }
 
