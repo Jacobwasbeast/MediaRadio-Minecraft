@@ -567,7 +567,9 @@ public class SharedMediaManager {
         RadioRuntimeStateSavedData.RadioRuntimeState state = resolveOrCreateScopedState(runtimeData, runtimeKey, radioId);
         ensureSessionIdentity(state, runtimeKey);
         long nowMs = System.currentTimeMillis();
-        if (normalizeRuntimeStateForAccess(runtimeData, state, nowMs, false)) {
+        // Clients that just finished a track re-request state expecting the next queue entry;
+        // allow the runtime to advance here so the server, not the client, stays authoritative.
+        if (normalizeRuntimeStateForAccess(runtimeData, state, nowMs, true)) {
             preservePlaybackTimelineAnchor(runtimeData, state, nowMs);
             markRuntimeMutation(state, runtimeKey, nowMs);
             runtimeData.setDirty();
