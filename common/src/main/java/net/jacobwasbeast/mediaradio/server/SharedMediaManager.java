@@ -54,7 +54,7 @@ public class SharedMediaManager {
     public static void initialize() {
         Balm.getEvents().onEvent(net.blay09.mods.balm.api.event.PlayerLoginEvent.class,
                 event -> {
-                    ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshot(event.getPlayer().server));
+                    ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshotForPlayer(event.getPlayer()));
                     syncActiveHandheldRadiosToPlayer(event.getPlayer());
                 });
         Balm.getEvents().onTickEvent(TickType.Server, TickPhase.End, (net.blay09.mods.balm.api.event.ServerTickHandler) server -> {
@@ -85,7 +85,70 @@ public class SharedMediaManager {
 
         data.setSnapshotJson(mergedJson);
 
-        ModNetworking.broadcastSharedSnapshot(player.server, mergedJson);
+        broadcastPlayerScopedSnapshots(player.server, mergedSnapshot);
+    }
+
+    public static String getSnapshotForPlayer(ServerPlayer player) {
+        if (player == null) {
+            return new SharedMediaSnapshot().toJson();
+        }
+        SharedMediaSnapshot full = SharedMediaSnapshot.fromJson(getSnapshot(player.server));
+        return filterSnapshotForViewer(full, player.getStringUUID(), player.getGameProfile().getName()).toJson();
+    }
+
+    private static void broadcastPlayerScopedSnapshots(MinecraftServer server, SharedMediaSnapshot full) {
+        if (server == null || full == null) {
+            return;
+        }
+        for (ServerPlayer viewer : server.getPlayerList().getPlayers()) {
+            SharedMediaSnapshot scoped = filterSnapshotForViewer(full, viewer.getStringUUID(), viewer.getGameProfile().getName());
+            ModNetworking.sendSharedSnapshot(viewer, scoped.toJson());
+        }
+    }
+
+    private static SharedMediaSnapshot filterSnapshotForViewer(SharedMediaSnapshot source, String viewerId, String viewerName) {
+        SharedMediaSnapshot filtered = new SharedMediaSnapshot();
+        if (source == null) {
+            return filtered;
+        }
+        String safeViewerId = safe(viewerId);
+
+        // Playlists: only those the viewer can see.
+        Set<String> referencedMediaIds = new HashSet<>();
+        for (Map.Entry<String, SharedMediaSnapshot.PlaylistEntry> entry : source.playlists.entrySet()) {
+            SharedMediaSnapshot.PlaylistEntry playlist = clonePlaylist(entry.getValue());
+            if (playlist == null || !playlist.canView(safeViewerId, viewerName)) {
+                continue;
+            }
+            filtered.playlists.put(entry.getKey(), playlist);
+            if (playlist.mediaIds != null) {
+                for (String mediaId : playlist.mediaIds) {
+                    if (mediaId != null && !mediaId.isBlank()) {
+                        referencedMediaIds.add(mediaId);
+                    }
+                }
+            }
+        }
+
+        // Library: viewer's own entries, legacy unowned entries, or tracks referenced by a visible playlist.
+        for (Map.Entry<String, SharedMediaSnapshot.MediaEntry> entry : source.library.entrySet()) {
+            SharedMediaSnapshot.MediaEntry media = cloneMedia(entry.getValue(), entry.getKey());
+            if (media == null) {
+                continue;
+            }
+            boolean owned = media.ownerId.isBlank() || media.ownerId.equals(safeViewerId);
+            boolean referenced = referencedMediaIds.contains(entry.getKey());
+            if (!owned && !referenced) {
+                continue;
+            }
+            if (!owned) {
+                // Foreign tracks imported via shared playlists must not pollute the viewer's library list.
+                media.hiddenFromLibrary = true;
+            }
+            filtered.library.put(entry.getKey(), media);
+        }
+
+        return filtered.sanitize();
     }
 
     public static void handleClientSnapshotUploadChunk(
@@ -1329,6 +1392,7 @@ public class SharedMediaManager {
             }
         }
         // Merge incoming media updates without wiping existing metadata on blank fields.
+        String safePlayerId = safe(playerId);
         for (Map.Entry<String, SharedMediaSnapshot.MediaEntry> entry : incoming.library.entrySet()) {
             String mediaId = safe(entry.getKey());
             if (mediaId.isBlank()) {
@@ -1344,10 +1408,22 @@ public class SharedMediaManager {
             }
             SharedMediaSnapshot.MediaEntry currentEntry = merged.library.get(resolvedId);
             if (currentEntry == null) {
+                // New library entries are owned by the uploader unless they referenced a foreign playlist track.
+                if (incomingEntry.ownerId.isBlank()) {
+                    incomingEntry.ownerId = safePlayerId;
+                }
                 merged.library.put(resolvedId, incomingEntry);
                 continue;
             }
-            merged.library.put(resolvedId, mergeMedia(currentEntry, incomingEntry, resolvedId));
+            // Only the owner (or legacy unowned entries) can mutate an existing library entry.
+            if (!currentEntry.ownerId.isBlank() && !currentEntry.ownerId.equals(safePlayerId)) {
+                continue;
+            }
+            SharedMediaSnapshot.MediaEntry combined = mergeMedia(currentEntry, incomingEntry, resolvedId);
+            if (combined != null && combined.ownerId.isBlank()) {
+                combined.ownerId = safePlayerId;
+            }
+            merged.library.put(resolvedId, combined);
         }
 
         // Start from current playlists so unauthorized deletions/edits are ignored.
@@ -1463,6 +1539,7 @@ public class SharedMediaManager {
         copy.thumbnail = safe(source.thumbnail);
         copy.tags = source.tags == null ? new java.util.ArrayList<>() : new java.util.ArrayList<>(source.tags);
         copy.hiddenFromLibrary = source.hiddenFromLibrary;
+        copy.ownerId = safe(source.ownerId);
         copy.sanitize();
         if (copy.url.isBlank()) {
             return null;
@@ -1500,6 +1577,7 @@ public class SharedMediaManager {
                 merged.tags = new java.util.ArrayList<>(incoming.tags);
             }
             merged.hiddenFromLibrary = merged.hiddenFromLibrary && incoming.hiddenFromLibrary;
+            // Preserve existing owner; never let a client claim ownership of another player's entry.
         }
         merged.sanitize();
         return merged;

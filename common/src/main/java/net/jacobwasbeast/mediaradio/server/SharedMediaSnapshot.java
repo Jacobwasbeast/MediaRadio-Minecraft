@@ -137,6 +137,7 @@ public class SharedMediaSnapshot {
         public String thumbnail = "";
         public List<String> tags = new ArrayList<>();
         public boolean hiddenFromLibrary = false;
+        public String ownerId = "";
 
         public void sanitize() {
             id = safe(id);
@@ -144,9 +145,15 @@ public class SharedMediaSnapshot {
             title = safe(title);
             artist = safe(artist);
             thumbnail = safe(thumbnail);
+            ownerId = safe(ownerId);
             if (tags == null) {
                 tags = new ArrayList<>();
             }
+        }
+
+        public boolean isOwnedBy(String playerId) {
+            String safePlayerId = safe(playerId);
+            return !ownerId.isBlank() && ownerId.equals(safePlayerId);
         }
     }
 
