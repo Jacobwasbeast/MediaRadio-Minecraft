@@ -1,4 +1,4 @@
-package net.jacobwasbeast.mediaradio.fabric.compat;
+package net.jacobwasbeast.mediaradio.neoforge.compat;
 
 import net.jacobwasbeast.mediaradio.MediaRadio;
 

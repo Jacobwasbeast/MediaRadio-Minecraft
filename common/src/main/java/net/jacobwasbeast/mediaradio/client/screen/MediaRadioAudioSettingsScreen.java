@@ -5,7 +5,6 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
-import net.minecraft.client.gui.screens.OptionsSubScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
@@ -16,11 +15,22 @@ import java.util.Locale;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-public class MediaRadioAudioSettingsScreen extends OptionsSubScreen {
+public class MediaRadioAudioSettingsScreen extends Screen {
     private static final Component TITLE = Component.literal("Media Radio Audio Settings");
+    private final Screen parent;
+    private final Options options;
 
     public MediaRadioAudioSettingsScreen(Screen parent, Options options) {
-        super(parent, options, TITLE);
+        super(TITLE);
+        this.parent = parent;
+        this.options = options;
+    }
+
+    @Override
+    public void onClose() {
+        if (minecraft != null) {
+            minecraft.setScreen(parent);
+        }
     }
 
     @Override
@@ -95,9 +105,8 @@ public class MediaRadioAudioSettingsScreen extends OptionsSubScreen {
 
     @Override
     public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
-        renderBackground(guiGraphics);
-        guiGraphics.drawCenteredString(font, title, width / 2, 18, 0xFFFFFF);
         super.render(guiGraphics, mouseX, mouseY, partialTick);
+        guiGraphics.drawCenteredString(font, title, width / 2, 18, 0xFFFFFF);
     }
 
     private static class VolumeSlider extends AbstractSliderButton {

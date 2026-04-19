@@ -43,6 +43,7 @@ import java.util.Map;
 
 public class RadioBlock extends BaseEntityBlock implements EntityBlock {
 
+    public static final com.mojang.serialization.MapCodec<RadioBlock> CODEC = simpleCodec(properties -> new RadioBlock());
     public static final DirectionProperty FACING = BlockStateProperties.HORIZONTAL_FACING;
     private static final VoxelShape NORTH_SHAPE = Shapes.or(
             // Main body and front panel depth from the block model.
@@ -57,6 +58,11 @@ public class RadioBlock extends BaseEntityBlock implements EntityBlock {
     public RadioBlock() {
         super(BlockBehaviour.Properties.of().strength(1.6f).sound(SoundType.METAL).noOcclusion());
         registerDefaultState(stateDefinition.any().setValue(FACING, Direction.NORTH));
+    }
+
+    @Override
+    protected com.mojang.serialization.MapCodec<? extends BaseEntityBlock> codec() {
+        return CODEC;
     }
 
     @Override
@@ -110,7 +116,7 @@ public class RadioBlock extends BaseEntityBlock implements EntityBlock {
     }
 
     @Override
-    public InteractionResult use(BlockState state, Level level, BlockPos pos, Player player, InteractionHand hand, BlockHitResult hitResult) {
+    protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hitResult) {
         if (player.isShiftKeyDown()) {
             if (!level.isClientSide) {
                 pickupRadio(level, pos, player);
@@ -126,12 +132,12 @@ public class RadioBlock extends BaseEntityBlock implements EntityBlock {
     }
 
     @Override
-    public void playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
+    public BlockState playerWillDestroy(Level level, BlockPos pos, BlockState state, Player player) {
         if (!level.isClientSide && !player.isCreative()) {
             ItemStack stack = createStackFromBlock(level, pos);
             popResource(level, pos, stack);
         }
-        super.playerWillDestroy(level, pos, state, player);
+        return super.playerWillDestroy(level, pos, state, player);
     }
 
     private void pickupRadio(Level level, BlockPos pos, Player player) {

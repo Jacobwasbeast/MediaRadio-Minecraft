@@ -28,7 +28,7 @@ import java.util.List;
 import java.util.Locale;
 
 public final class RadioItemModelOverlayRenderer {
-    private static final ResourceLocation WHITE_TEXTURE = new ResourceLocation("minecraft", "textures/misc/white.png");
+    private static final ResourceLocation WHITE_TEXTURE = ResourceLocation.withDefaultNamespace("textures/misc/white.png");
     private static final int PANEL_WIDTH = 96;
     private static final int PANEL_HEIGHT = 78;
     private static final int LINE_HEIGHT = 10;
@@ -161,7 +161,7 @@ public final class RadioItemModelOverlayRenderer {
         for (int i = 0; i < lines.size(); i++) {
             DisplayLine line = lines.get(i);
             float y = startY + (i * LINE_HEIGHT);
-            font.drawInBatch(line.text(), textX, y, line.color(), true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
+            font.drawInBatch(line.text(), textX, y, line.setColor(), true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
         }
     }
 
@@ -175,10 +175,10 @@ public final class RadioItemModelOverlayRenderer {
         int b = PANEL_BG_COLOR & 0xFF;
 
         float z = 0.0f;
-        consumer.vertex(matrix, x, y + height, z).color(r, g, b, a).uv(0f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
-        consumer.vertex(matrix, x + width, y + height, z).color(r, g, b, a).uv(1f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
-        consumer.vertex(matrix, x + width, y, z).color(r, g, b, a).uv(1f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
-        consumer.vertex(matrix, x, y, z).color(r, g, b, a).uv(0f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.addVertex(matrix, x, y + height, z).setColor(r, g, b, a).setUv(0f, 1f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
+        consumer.addVertex(matrix, x + width, y + height, z).setColor(r, g, b, a).setUv(1f, 1f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
+        consumer.addVertex(matrix, x + width, y, z).setColor(r, g, b, a).setUv(1f, 0f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
+        consumer.addVertex(matrix, x, y, z).setColor(r, g, b, a).setUv(0f, 0f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
     }
 
     private static void drawThumbnail(PoseStack poseStack, MultiBufferSource bufferSource, Font font, ThumbnailTextureManager.TextureHandle texture, int x, int y, int width, int height, int packedLight) {
@@ -214,10 +214,10 @@ public final class RadioItemModelOverlayRenderer {
         var normal = poseStack.last().normal();
         float z = 0.01f;
 
-        consumer.vertex(matrix, left, bottom, z).color(255, 255, 255, 255).uv(0f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
-        consumer.vertex(matrix, right, bottom, z).color(255, 255, 255, 255).uv(1f, 1f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
-        consumer.vertex(matrix, right, top, z).color(255, 255, 255, 255).uv(1f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
-        consumer.vertex(matrix, left, top, z).color(255, 255, 255, 255).uv(0f, 0f).overlayCoords(OverlayTexture.NO_OVERLAY).uv2(packedLight).normal(normal, 0f, 0f, 1f).endVertex();
+        consumer.addVertex(matrix, left, bottom, z).setColor(255, 255, 255, 255).setUv(0f, 1f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
+        consumer.addVertex(matrix, right, bottom, z).setColor(255, 255, 255, 255).setUv(1f, 1f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
+        consumer.addVertex(matrix, right, top, z).setColor(255, 255, 255, 255).setUv(1f, 0f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
+        consumer.addVertex(matrix, left, top, z).setColor(255, 255, 255, 255).setUv(0f, 0f).setOverlay(OverlayTexture.NO_OVERLAY).setLight(packedLight).setNormal(poseStack.last(), 0f, 0f, 1f);
     }
 
     private static void drawMissingThumbnailPlaceholder(PoseStack poseStack, MultiBufferSource bufferSource, Font font, int x, int y, int width, int height, int packedLight) {

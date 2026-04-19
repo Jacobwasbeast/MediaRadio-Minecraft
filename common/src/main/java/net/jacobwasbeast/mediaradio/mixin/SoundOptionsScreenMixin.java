@@ -4,7 +4,7 @@ import net.jacobwasbeast.mediaradio.client.settings.ClientAudioSettings;
 import net.jacobwasbeast.mediaradio.client.screen.MediaRadioAudioSettingsScreen;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.gui.screens.SoundOptionsScreen;
+import net.minecraft.client.gui.screens.options.SoundOptionsScreen;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;

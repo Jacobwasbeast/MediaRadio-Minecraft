@@ -1,26 +1,17 @@
 plugins {
     id 'multiloader-loader'
-    id 'net.neoforged.moddev.legacyforge'
+    id 'net.neoforged.moddev'
     id 'net.darkhax.curseforgegradle'
     id "com.modrinth.minotaur"
     id "com.github.johnrengelman.shadow" version "8.1.1"
 }
 
-mixin {
-    add(sourceSets.main, "${mod_id}.refmap.json")
-
-    config("${mod_id}.mixins.json")
-    config("${mod_id}.forge.mixins.json")
-}
-
-legacyForge {
-    version = "${minecraft_version}-${forge_version}"
-
-    validateAccessTransformers = true
+neoForge {
+    version = neoforge_version
 
     def at = project(':common').file('src/main/resources/META-INF/accesstransformer.cfg')
     if (at.exists()) {
-        accessTransformers = ["src/main/resources/META-INF/accesstransformer.cfg"]
+        accessTransformers.add(at.absolutePath)
     }
 
     parchment {
@@ -52,7 +43,6 @@ sourceSets.main.resources.srcDir 'src/generated/resources'
 configurations {
     shadowIn
     implementation.extendsFrom shadowIn
-    additionalRuntimeClasspath.extendsFrom shadowIn
 }
 
 dependencies {
@@ -65,28 +55,10 @@ jar {
         zipTree(tasks.shadowJar.archiveFile.get().asFile)
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    finalizedBy('reobfJar')
     manifest.attributes([
-            "MixinConfigs": "${mod_id}.mixins.json,${mod_id}.forge.mixins.json"
+            "MixinConfigs": "${mod_id}.mixins.json,${mod_id}.neoforge.mixins.json"
     ])
 }
-
-tasks.register('noShadowJar', Jar) {
-    dependsOn(tasks.compileJava)
-    archiveClassifier.set("no-shadow")
-    from(sourceSets.main.output)
-    from("$buildDir/mixin/${mod_id}.refmap.json")
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    manifest.attributes([
-            "MixinConfigs": "${mod_id}.mixins.json,${mod_id}.forge.mixins.json"
-    ])
-}
-
-def reobfNoShadowJar = obfuscation.reobfuscate(tasks.named('noShadowJar', Jar), sourceSets.main) {
-    it.archiveClassifier.set("no-shadow")
-}
-
-build.dependsOn(reobfNoShadowJar)
 
 shadowJar {
     archiveClassifier.set("shadow")
@@ -125,7 +97,7 @@ apply from: 'dependencies.gradle'
 
 task curseforge(type: net.darkhax.curseforgegradle.TaskPublishCurseForge) {
     dependsOn('build')
-    description = 'Publishes the Forge build to CurseForge.'
+    description = 'Publishes the NeoForge build to CurseForge.'
     group = 'publishing'
 
     apiToken = project.findProperty("curseforge.api_key") ?: System.getenv("CURSEFORGE_TOKEN") ?: "none"
@@ -147,12 +119,12 @@ modrinth {
     token = project.findProperty("modrinth.token") ?: System.getenv("MODRINTH_TOKEN") ?: "none"
     projectId = findProperty("modrinth_project_id")
     versionType = "release"
-    versionNumber = project.version + "+forge-" + project.minecraft_version
+    versionNumber = project.version + "+neoforge-" + project.minecraft_version
     uploadFile = jar
     changelog = rootProject.file("CHANGELOG.md").text
     gameVersions = project.minecraft_versions.split(',').toList()
     syncBodyFrom = rootProject.file("modpage.md").text
-    loaders = ['forge']
+    loaders = ['neoforge']
     dependencies {
         required.project "balm"
     }

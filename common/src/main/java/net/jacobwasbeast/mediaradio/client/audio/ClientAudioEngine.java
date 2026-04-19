@@ -1850,7 +1850,7 @@ public class ClientAudioEngine {
         Vec3 position = entity.position();
         if (context.localPos != null) {
             Vec3 localCenter = Vec3.atCenterOf(context.localPos);
-            float partialTicks = minecraft.getFrameTime();
+            float partialTicks = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(true);
             try {
                 Object transformed = entity.getClass()
                         .getMethod("toGlobalVector", Vec3.class, float.class)

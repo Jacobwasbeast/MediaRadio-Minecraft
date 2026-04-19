@@ -1,18 +1,18 @@
 plugins {
     id 'multiloader-common'
-    id 'net.neoforged.moddev.legacyforge'
+    id 'net.neoforged.moddev'
 }
 
 base {
     archivesName = "${mod_id}-common-${minecraft_version}"
 }
 
-legacyForge {
-    mcpVersion = minecraft_version
-    // Automatically enable AccessTransformers if the file exists
+neoForge {
+    neoFormVersion = "1.21.1-20240808.144430"
+    // AccessTransformers if file exists
     def at = file('src/main/resources/META-INF/accesstransformer.cfg')
     if (at.exists()) {
-        accessTransformers = ["src/main/resources/META-INF/accesstransformer.cfg"]
+        accessTransformers.add(at.absolutePath)
     }
     parchment {
         minecraftVersion = parchment_minecraft
@@ -22,6 +22,13 @@ legacyForge {
 
 dependencies {
     compileOnly "org.spongepowered:mixin:$mixin_version"
+}
+
+configurations.all {
+    resolutionStrategy {
+        force 'org.apache.httpcomponents:httpclient:4.5.14'
+        force 'org.apache.httpcomponents:httpcore:4.4.16'
+    }
 }
 
 apply from: rootProject.file('repositories.gradle')

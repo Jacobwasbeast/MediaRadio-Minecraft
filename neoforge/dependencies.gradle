@@ -1,0 +1,18 @@
+dependencies {
+    implementation("net.blay09.mods:balm-neoforge:${balm_version}") {
+        changing = balm_version.contains("SNAPSHOT")
+    }
+    implementation("net.blay09.mods:kuma-api-neoforge:${kuma_version}")
+    compileOnly("com.simibubi.create:create-neoforge-1.21.1:${create_neoforge_version}:slim") {
+        transitive = false
+    }
+
+    shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
+        exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
+    }
+    shadowIn("dev.lavalink.youtube:v2:1.18.0")
+
+    runtimeOnly("dev.arbjerg:lavaplayer:2.2.6")
+    runtimeOnly("dev.arbjerg:lavaplayer-natives:2.2.6")
+    runtimeOnly("dev.lavalink.youtube:v2:1.18.0")
+}

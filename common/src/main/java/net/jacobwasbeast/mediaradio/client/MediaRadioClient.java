@@ -307,7 +307,7 @@ public class MediaRadioClient {
         if (main == stack) {
             return 1f;
         }
-        return ItemStack.isSameItemSameTags(main, stack) ? 1f : 0f;
+        return ItemStack.isSameItemSameComponents(main, stack) ? 1f : 0f;
     }
 
     private static class RadioQueueChunkAccumulator {

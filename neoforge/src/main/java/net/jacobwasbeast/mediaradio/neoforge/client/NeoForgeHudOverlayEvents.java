@@ -1,17 +1,17 @@
-package net.jacobwasbeast.mediaradio.forge.client;
+package net.jacobwasbeast.mediaradio.neoforge.client;
 
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.client.render.RadioHeldOverlayRenderer;
 import net.minecraft.client.Minecraft;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.RenderGuiEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.RenderGuiEvent;
 
-@Mod.EventBusSubscriber(modid = MediaRadio.MOD_ID, value = Dist.CLIENT, bus = Mod.EventBusSubscriber.Bus.FORGE)
-public final class ForgeHudOverlayEvents {
+@EventBusSubscriber(modid = MediaRadio.MOD_ID, value = Dist.CLIENT, bus = EventBusSubscriber.Bus.GAME)
+public final class NeoForgeHudOverlayEvents {
 
-    private ForgeHudOverlayEvents() {
+    private NeoForgeHudOverlayEvents() {
     }
 
     @SubscribeEvent

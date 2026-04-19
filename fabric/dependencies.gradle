@@ -1,27 +1,3 @@
-configurations {
-    createEmbedded
-}
-
-tasks.register("extractCreateEmbeddedDeps", Copy) {
-    from {
-        zipTree(configurations.createEmbedded.singleFile)
-    }
-    include "META-INF/jars/*.jar"
-    eachFile { details ->
-        details.path = details.name
-    }
-    includeEmptyDirs = false
-    into layout.buildDirectory.dir("tmp/createEmbedded")
-}
-
-tasks.named("compileJava") {
-    dependsOn("extractCreateEmbeddedDeps")
-}
-
-tasks.matching { it.name == "remapSourcesJar" }.configureEach {
-    dependsOn("extractCreateEmbeddedDeps")
-}
-
 dependencies {
     modImplementation("net.blay09.mods:balm-fabric:${balm_version}") {
         exclude(group: "net.blay09.mods", module: "shared-bridge")
@@ -29,11 +5,7 @@ dependencies {
     }
     modImplementation("net.blay09.mods:kuma-api-fabric:${kuma_version}")
     modCompileOnly "com.terraformersmc:modmenu:$modmenu_version"
-    createEmbedded("maven.modrinth:create-fabric:${create_fabric_version}") {
-        transitive = false
-    }
-    modCompileOnly("maven.modrinth:create-fabric:${create_fabric_version}")
-    compileOnly(fileTree(dir: layout.buildDirectory.dir("tmp/createEmbedded"), include: ["*.jar"]))
+
     shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
         exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
     }

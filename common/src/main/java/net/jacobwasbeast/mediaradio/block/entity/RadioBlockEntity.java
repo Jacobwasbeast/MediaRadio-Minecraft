@@ -1,6 +1,7 @@
 package net.jacobwasbeast.mediaradio.block.entity;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
@@ -194,8 +195,8 @@ public class RadioBlockEntity extends BlockEntity {
     }
 
     @Override
-    protected void saveAdditional(CompoundTag tag) {
-        super.saveAdditional(tag);
+    protected void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
+        super.saveAdditional(tag, registries);
         tag.putString(TAG_RADIO_ID, radioId);
         tag.putString(TAG_OWNER_ID, ownerId);
         tag.putString(TAG_MEDIA_URL, mediaUrl);
@@ -211,8 +212,8 @@ public class RadioBlockEntity extends BlockEntity {
     }
 
     @Override
-    public void load(CompoundTag tag) {
-        super.load(tag);
+    protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries) {
+        super.loadAdditional(tag, registries);
         radioId = safe(tag.getString(TAG_RADIO_ID));
         ownerId = safe(tag.getString(TAG_OWNER_ID));
         mediaUrl = safe(tag.getString(TAG_MEDIA_URL));
@@ -229,8 +230,8 @@ public class RadioBlockEntity extends BlockEntity {
     }
 
     @Override
-    public CompoundTag getUpdateTag() {
-        return saveWithoutMetadata();
+    public CompoundTag getUpdateTag(HolderLookup.Provider registries) {
+        return saveWithoutMetadata(registries);
     }
 
     public static void serverTick(Level level, BlockPos blockPos, BlockState blockState, RadioBlockEntity radioBlockEntity) {
@@ -246,8 +247,8 @@ public class RadioBlockEntity extends BlockEntity {
         SharedMediaManager.applyRuntimeStateToBlockEntity(this);
     }
 
-    public void handleUpdateTag(CompoundTag tag) {
-        load(tag);
+    public void handleUpdateTag(CompoundTag tag, HolderLookup.Provider registries) {
+        loadAdditional(tag, registries);
     }
 
     @Override
