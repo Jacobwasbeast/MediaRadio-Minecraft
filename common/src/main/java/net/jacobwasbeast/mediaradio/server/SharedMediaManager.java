@@ -3,6 +3,8 @@ package net.jacobwasbeast.mediaradio.server;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import net.blay09.mods.balm.api.Balm;
+import net.blay09.mods.balm.api.event.TickPhase;
+import net.blay09.mods.balm.api.event.TickType;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.block.entity.RadioBlockEntity;
 import net.jacobwasbeast.mediaradio.network.ModNetworking;
@@ -55,14 +57,10 @@ public class SharedMediaManager {
                     ModNetworking.sendSharedSnapshot(event.getPlayer(), getSnapshotForPlayer(event.getPlayer()));
                     syncActiveHandheldRadiosToPlayer(event.getPlayer());
                 });
-    }
-
-    public static void tickServer(MinecraftServer server) {
-        if (server == null) {
-            return;
-        }
-        simulateUnownedRadioPlayback(server);
-        syncActiveHandheldRadiosToNearbyPlayers(server);
+        Balm.getEvents().onTickEvent(TickType.Server, TickPhase.End, (net.blay09.mods.balm.api.event.ServerTickHandler) server -> {
+            simulateUnownedRadioPlayback(server);
+            syncActiveHandheldRadiosToNearbyPlayers(server);
+        });
     }
 
     public static String getSnapshot(MinecraftServer server) {

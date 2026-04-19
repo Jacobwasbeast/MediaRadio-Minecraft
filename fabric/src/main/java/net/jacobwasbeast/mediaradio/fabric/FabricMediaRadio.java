@@ -3,16 +3,13 @@ package net.jacobwasbeast.mediaradio.fabric;
 import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.EmptyLoadContext;
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.jacobwasbeast.mediaradio.MediaRadio;
-import net.jacobwasbeast.mediaradio.server.SharedMediaManager;
 import net.fabricmc.loader.api.FabricLoader;
 
 public class FabricMediaRadio implements ModInitializer {
     @Override
     public void onInitialize() {
         Balm.initialize(MediaRadio.MOD_ID, EmptyLoadContext.INSTANCE, MediaRadio::initialize);
-        ServerTickEvents.END_SERVER_TICK.register(SharedMediaManager::tickServer);
         if (FabricLoader.getInstance().isModLoaded("create")) {
             tryInitializeCreateCompat();
         }

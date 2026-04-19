@@ -7,8 +7,6 @@ import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.MissingTextureAtlasSprite;
 import net.minecraft.resources.ResourceLocation;
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -91,10 +89,9 @@ public final class ThumbnailTextureManager {
                 }
 
                 inputStream = rawConnection.getInputStream();
-                BufferedImage bufferedImage = ImageIO.read(inputStream);
+                NativeImage image = NativeImage.read(inputStream);
                 inputStream.close();
                 inputStream = null;
-                NativeImage image = bufferedImage == null ? null : toNativeImage(bufferedImage);
                 if (image == null || image.getWidth() <= 0 || image.getHeight() <= 0) {
                     failedLoads.put(url, System.currentTimeMillis());
                     cache.put(url, FALLBACK);
@@ -103,19 +100,18 @@ public final class ThumbnailTextureManager {
 
                 int width = image.getWidth();
                 int height = image.getHeight();
+                DynamicTexture dynamicTexture = new DynamicTexture(image);
                 ResourceLocation id = MediaRadio.id("thumbnail/" + sha1(url));
 
                 Minecraft minecraft = Minecraft.getInstance();
                 minecraft.execute(() -> {
-                    DynamicTexture dynamicTexture = new DynamicTexture(image);
                     minecraft.getTextureManager().register(id, dynamicTexture);
                     cache.put(url, new TextureHandle(id, width, height));
                     touch(url);
                     failedLoads.remove(url);
                     trimLiveTextureCache(minecraft);
                 });
-            } catch (Exception exception) {
-                MediaRadio.LOGGER.warn("Thumbnail load failed for {}: {}", url, exception.toString());
+            } catch (Exception ignored) {
                 failedLoads.put(url, System.currentTimeMillis());
                 cache.put(url, FALLBACK);
                 touch(url);
@@ -234,23 +230,6 @@ public final class ThumbnailTextureManager {
         } catch (Exception exception) {
             return false;
         }
-    }
-
-    private static NativeImage toNativeImage(BufferedImage bufferedImage) {
-        int width = bufferedImage.getWidth();
-        int height = bufferedImage.getHeight();
-        NativeImage nativeImage = new NativeImage(width, height, false);
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int argb = bufferedImage.getRGB(x, y);
-                int a = (argb >> 24) & 0xFF;
-                int r = (argb >> 16) & 0xFF;
-                int g = (argb >> 8) & 0xFF;
-                int b = argb & 0xFF;
-                nativeImage.setPixelRGBA(x, y, (a << 24) | (b << 16) | (g << 8) | r);
-            }
-        }
-        return nativeImage;
     }
 
     private static String sha1(String value) {
