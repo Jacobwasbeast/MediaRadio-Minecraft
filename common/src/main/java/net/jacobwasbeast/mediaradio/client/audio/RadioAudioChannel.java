@@ -573,11 +573,10 @@ public class RadioAudioChannel {
                 return;
             }
 
-            int alFormat = AL_FORMAT_STEREO16;
-            if (spatial) {
-                data = downmixStereo16ToMono16(data);
-                alFormat = AL_FORMAT_MONO16;
-            }
+            // Both spatial and non-spatial radios downmix to mono so loudness stays consistent
+            // between a held radio and a block radio heard at close range.
+            data = downmixStereo16ToMono16(data);
+            int alFormat = AL_FORMAT_MONO16;
 
             clearOpenAlErrorState();
             int bufferId;

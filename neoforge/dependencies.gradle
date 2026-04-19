@@ -13,7 +13,10 @@ dependencies {
     }
     shadowIn("dev.lavalink.youtube:v2:1.18.0")
 
-    runtimeOnly("dev.arbjerg:lavaplayer:2.2.6")
-    runtimeOnly("dev.arbjerg:lavaplayer-natives:2.2.6")
-    runtimeOnly("dev.lavalink.youtube:v2:1.18.0")
+    // Dev classpath: merged into a single jar by mergeDevAudioLibs to dodge JPMS split-package rejection.
+    devAudioLibs("dev.arbjerg:lavaplayer:2.2.6")
+    devAudioLibs("dev.arbjerg:lava-common:2.2.6")
+    devAudioLibs("dev.arbjerg:lavaplayer-natives:2.2.6")
+    devAudioLibs("dev.lavalink.youtube:v2:1.18.0")
+    devAudioLibs("dev.lavalink.youtube:common:1.18.0")
 }

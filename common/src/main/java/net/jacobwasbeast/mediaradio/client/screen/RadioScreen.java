@@ -33,6 +33,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class RadioScreen extends Screen {
 
+    @Override
+    protected void renderBlurredBackground(float partialTick) {
+    }
+
     private static final int PANEL_WIDTH = 620;
     private static final int PANEL_HEIGHT = 352;
     private static final int HEADER_HEIGHT = 42;

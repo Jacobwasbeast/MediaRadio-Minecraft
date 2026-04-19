@@ -888,6 +888,14 @@ public class ClientAudioEngine {
                 collector.add(radioId);
             }
         }
+        // Include the cursor ("carried") stack so dragging the radio between slots doesn't briefly
+        // treat the session as orphaned and stop playback.
+        if (minecraft.player.containerMenu != null) {
+            String carriedRadioId = radioIdFromStack(minecraft.player.containerMenu.getCarried());
+            if (!carriedRadioId.isBlank()) {
+                collector.add(carriedRadioId);
+            }
+        }
     }
 
     private void pruneOrphanedHandheldSessions(Minecraft minecraft) {
@@ -2001,6 +2009,12 @@ public class ClientAudioEngine {
         for (ItemStack stack : minecraft.player.getInventory().offhand) {
             if (stack.is(ModItems.RADIO_ITEM) && targetRadioId.equals(RadioItem.getRadioId(stack))) {
                 return stack;
+            }
+        }
+        if (minecraft.player.containerMenu != null) {
+            ItemStack carried = minecraft.player.containerMenu.getCarried();
+            if (carried.is(ModItems.RADIO_ITEM) && targetRadioId.equals(RadioItem.getRadioId(carried))) {
+                return carried;
             }
         }
         return ItemStack.EMPTY;
