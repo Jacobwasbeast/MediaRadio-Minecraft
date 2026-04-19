@@ -896,6 +896,7 @@ public class ClientAudioEngine {
                 collector.add(carriedRadioId);
             }
         }
+        net.jacobwasbeast.mediaradio.compat.RadioAccessoryHooks.get().collectRadioIds(minecraft.player, collector);
     }
 
     private void pruneOrphanedHandheldSessions(Minecraft minecraft) {
@@ -2016,6 +2017,10 @@ public class ClientAudioEngine {
             if (carried.is(ModItems.RADIO_ITEM) && targetRadioId.equals(RadioItem.getRadioId(carried))) {
                 return carried;
             }
+        }
+        ItemStack accessory = net.jacobwasbeast.mediaradio.compat.RadioAccessoryHooks.get().findRadioStack(minecraft.player, targetRadioId);
+        if (!accessory.isEmpty()) {
+            return accessory;
         }
         return ItemStack.EMPTY;
     }

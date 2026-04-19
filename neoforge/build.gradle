@@ -46,6 +46,23 @@ configurations {
     devAudioLibs {
         canBeResolved = true
     }
+    devMods {
+        canBeResolved = true
+    }
+}
+
+// Copy external mod jars into the dev run's mods/ folder so FML discovers them
+// as real mod installations (classpath scanning of external mod jars is unreliable).
+tasks.register('stageDevMods', Copy) {
+    from { configurations.devMods }
+    into layout.projectDirectory.dir("run/mods")
+    include '*.jar'
+}
+
+afterEvaluate {
+    tasks.matching { it.name.startsWith('run') || it.name.startsWith('prepareRun') }.configureEach {
+        dependsOn('stageDevMods')
+    }
 }
 
 // Merge lavaplayer + lavalink-youtube into one jar for dev runs.

@@ -1618,6 +1618,10 @@ public class SharedMediaManager {
                 && !net.jacobwasbeast.mediaradio.item.RadioItem.isPlaceMode(off)) {
             return true;
         }
+        // Radios worn in Curios (or equivalent) accessory slots broadcast as if held.
+        if (net.jacobwasbeast.mediaradio.compat.RadioAccessoryHooks.get().hasRadioWithId(player, radioId)) {
+            return true;
+        }
         // Broadcast inventory-slot radios unconditionally; listeners gate via hearInventoryPlayerRadios client-side.
         return hasRadioInInventory(player, radioId);
     }
@@ -2031,7 +2035,14 @@ public class SharedMediaManager {
     }
 
     private static boolean isInventoryPlaybackContext(ServerPlayer player, String radioId) {
-        return !isHeldHandRadio(player, radioId) && hasRadioInInventory(player, radioId);
+        if (isHeldHandRadio(player, radioId)) {
+            return false;
+        }
+        // Curios/accessory-equipped radios count as "held" for listener gating purposes.
+        if (net.jacobwasbeast.mediaradio.compat.RadioAccessoryHooks.get().hasRadioWithId(player, radioId)) {
+            return false;
+        }
+        return hasRadioInInventory(player, radioId);
     }
 
     private static void simulateUnownedRadioPlayback(MinecraftServer server) {

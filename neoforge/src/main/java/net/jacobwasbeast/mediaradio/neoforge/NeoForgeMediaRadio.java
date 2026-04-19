@@ -12,6 +12,7 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
@@ -26,18 +27,44 @@ public class NeoForgeMediaRadio {
         modEventBus.addListener(this::onCommonSetup);
         NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> SharedMediaManager.tickServer(event.getServer()));
         if (FMLEnvironment.dist == Dist.CLIENT) {
-            initializeClient(context, modContainer);
+            initializeClient(context, modContainer, modEventBus);
         }
     }
 
-    private static void initializeClient(NeoForgeLoadContext context, ModContainer modContainer) {
+    private static void initializeClient(NeoForgeLoadContext context, ModContainer modContainer, IEventBus modEventBus) {
         BalmClient.initialize(MediaRadio.MOD_ID, context, MediaRadioClient::initialize);
         NeoForgeConfigScreenIntegration.register(modContainer);
+        modEventBus.addListener((FMLClientSetupEvent event) -> {
+            if (ModList.get().isLoaded("curios")) {
+                tryInitializeCuriosClient();
+            }
+        });
     }
 
     private void onCommonSetup(FMLCommonSetupEvent event) {
         if (ModList.get().isLoaded("create")) {
             tryInitializeCreateCompat();
+        }
+        if (ModList.get().isLoaded("curios")) {
+            tryInitializeCuriosCommon();
+        }
+    }
+
+    private static void tryInitializeCuriosCommon() {
+        try {
+            Class<?> compatClass = Class.forName("net.jacobwasbeast.mediaradio.neoforge.compat.CuriosCompat");
+            compatClass.getMethod("initialize").invoke(null);
+        } catch (Exception exception) {
+            MediaRadio.LOGGER.error("Failed to initialize Curios accessory provider", exception);
+        }
+    }
+
+    private static void tryInitializeCuriosClient() {
+        try {
+            Class<?> compatClass = Class.forName("net.jacobwasbeast.mediaradio.neoforge.compat.CuriosCompat");
+            compatClass.getMethod("initializeClient").invoke(null);
+        } catch (Exception exception) {
+            MediaRadio.LOGGER.error("Failed to initialize Curios client renderer", exception);
         }
     }
 

@@ -96,6 +96,13 @@ repositories {
     }
 
     maven {
+        url = "https://maven.theillusivec4.top/"
+        content {
+            includeGroup "top.theillusivec4.curios"
+        }
+    }
+
+    maven {
         url = "https://api.modrinth.com/maven"
         content {
             includeGroup "maven.modrinth"

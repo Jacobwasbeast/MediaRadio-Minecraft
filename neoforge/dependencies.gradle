@@ -8,6 +8,14 @@ dependencies {
         transitive = false
     }
 
+    compileOnly("top.theillusivec4.curios:curios-neoforge:${curios_neoforge_version}:api") {
+        transitive = false
+    }
+    // Stage the full Curios mod jar into runs/client/mods for dev testing.
+    devMods("top.theillusivec4.curios:curios-neoforge:${curios_neoforge_version}") {
+        transitive = false
+    }
+
     shadowIn("dev.arbjerg:lavaplayer:2.2.6") {
         exclude(group: "dev.arbjerg", module: "lavaplayer-natives")
     }
