@@ -130,19 +130,31 @@ public class SharedMediaManager {
             }
         }
 
+        // Precompute URLs this viewer has personally owned so legacy unowned duplicates are hidden.
+        Set<String> viewerOwnedUrls = new HashSet<>();
+        for (SharedMediaSnapshot.MediaEntry entry : source.library.values()) {
+            if (entry != null && entry.isOwnedBy(safeViewerId) && !entry.url.isBlank()) {
+                viewerOwnedUrls.add(entry.url);
+            }
+        }
+
         // Library: viewer's own entries, legacy unowned entries, or tracks referenced by a visible playlist.
         for (Map.Entry<String, SharedMediaSnapshot.MediaEntry> entry : source.library.entrySet()) {
             SharedMediaSnapshot.MediaEntry media = cloneMedia(entry.getValue(), entry.getKey());
             if (media == null) {
                 continue;
             }
-            boolean owned = media.ownerId.isBlank() || media.ownerId.equals(safeViewerId);
+            boolean ownsThis = media.isOwnedBy(safeViewerId);
+            boolean legacyUnowned = media.ownerId.isBlank();
             boolean referenced = referencedMediaIds.contains(entry.getKey());
-            if (!owned && !referenced) {
+            if (!ownsThis && !legacyUnowned && !referenced) {
                 continue;
             }
-            if (!owned) {
-                // Foreign tracks imported via shared playlists must not pollute the viewer's library list.
+            if (legacyUnowned && !ownsThis && viewerOwnedUrls.contains(media.url) && !referenced) {
+                continue;
+            }
+            if (!ownsThis) {
+                // Foreign or legacy tracks must not pollute the viewer's library list.
                 media.hiddenFromLibrary = true;
             }
             filtered.library.put(entry.getKey(), media);
@@ -1547,7 +1559,7 @@ public class SharedMediaManager {
             return null;
         }
         if (copy.id.isBlank()) {
-            copy.id = SharedMediaSnapshot.idForUrl(copy.url);
+            copy.id = SharedMediaSnapshot.idForOwnerUrl(copy.ownerId, copy.url);
         }
         return copy;
     }

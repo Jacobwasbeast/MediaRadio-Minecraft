@@ -65,7 +65,20 @@ public class SharedMediaSnapshot {
     }
 
     public MediaEntry upsertMedia(String url, String title, String artist, String thumbnail, List<String> tags, boolean hiddenFromLibrary) {
-        String id = idForUrl(url);
+        return upsertMedia("", url, title, artist, thumbnail, tags, hiddenFromLibrary);
+    }
+
+    public MediaEntry upsertMedia(
+            String ownerId,
+            String url,
+            String title,
+            String artist,
+            String thumbnail,
+            List<String> tags,
+            boolean hiddenFromLibrary
+    ) {
+        String safeOwnerId = safe(ownerId);
+        String id = idForOwnerUrl(safeOwnerId, url);
         boolean existed = library.containsKey(id);
         MediaEntry entry = library.computeIfAbsent(id, ignored -> new MediaEntry());
         entry.id = id;
@@ -74,8 +87,9 @@ public class SharedMediaSnapshot {
         entry.artist = safe(artist);
         entry.thumbnail = safe(thumbnail);
         entry.tags = tags == null ? new ArrayList<>() : new ArrayList<>(tags);
-        // `hiddenFromLibrary` means playlist-only entry.
-        // Never hide an already-visible entry when importing playlists.
+        if (!safeOwnerId.isBlank()) {
+            entry.ownerId = safeOwnerId;
+        }
         if (hiddenFromLibrary) {
             if (!existed) {
                 entry.hiddenFromLibrary = true;
@@ -123,6 +137,31 @@ public class SharedMediaSnapshot {
         } catch (Exception ignored) {
             return "media_" + Integer.toHexString(safe.hashCode());
         }
+    }
+
+    @NotNull
+    public static String idForOwnerUrl(String ownerId, String url) {
+        String safeOwnerId = safe(ownerId);
+        if (safeOwnerId.isBlank()) {
+            return idForUrl(url);
+        }
+        String urlId = idForUrl(url);
+        if (urlId.equals("media_empty")) {
+            return urlId;
+        }
+        String ownerHash;
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            byte[] hash = digest.digest(safeOwnerId.getBytes(StandardCharsets.UTF_8));
+            StringBuilder builder = new StringBuilder();
+            for (int i = 0; i < 6 && i < hash.length; i++) {
+                builder.append(String.format("%02x", hash[i]));
+            }
+            ownerHash = builder.toString();
+        } catch (Exception ignored) {
+            ownerHash = Integer.toHexString(safeOwnerId.hashCode());
+        }
+        return "media_" + ownerHash + "_" + urlId.substring("media_".length());
     }
 
     private static String safe(String value) {

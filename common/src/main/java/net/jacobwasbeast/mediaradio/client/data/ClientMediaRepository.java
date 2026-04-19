@@ -140,13 +140,13 @@ public class ClientMediaRepository {
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry upsertMedia(String url, String title, String artist, String thumbnail, List<String> tags) {
-        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(url, title, artist, thumbnail, tags, false);
+        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(localPlayerIdentity().playerId(), url, title, artist, thumbnail, tags, false);
         persistAndUpload();
         return mediaEntry;
     }
 
     public synchronized SharedMediaSnapshot.MediaEntry upsertPlaylistOnlyMedia(String url, String title, String artist, String thumbnail, List<String> tags) {
-        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(url, title, artist, thumbnail, tags, true);
+        SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.upsertMedia(localPlayerIdentity().playerId(), url, title, artist, thumbnail, tags, true);
         persistAndUpload();
         return mediaEntry;
     }
@@ -155,7 +155,22 @@ public class ClientMediaRepository {
         if (url == null || url.isBlank()) {
             return null;
         }
-        return snapshot.library.get(SharedMediaSnapshot.idForUrl(url));
+        String playerId = localPlayerIdentity().playerId();
+        SharedMediaSnapshot.MediaEntry ownedEntry = snapshot.library.get(SharedMediaSnapshot.idForOwnerUrl(playerId, url));
+        if (ownedEntry != null) {
+            return ownedEntry;
+        }
+        // Legacy unowned entries or foreign (playlist-referenced) entries share the url hash.
+        SharedMediaSnapshot.MediaEntry legacy = snapshot.library.get(SharedMediaSnapshot.idForUrl(url));
+        if (legacy != null) {
+            return legacy;
+        }
+        for (SharedMediaSnapshot.MediaEntry entry : snapshot.library.values()) {
+            if (entry != null && url.equals(entry.url)) {
+                return entry;
+            }
+        }
+        return null;
     }
 
     public synchronized void removeMedia(String mediaId) {
@@ -401,6 +416,7 @@ public class ClientMediaRepository {
         }
 
         int addedCount = 0;
+        String ownerId = localPlayerIdentity().playerId();
         Set<String> knownPlaylistMediaIds = new HashSet<>(playlist.mediaIds);
         for (PlaylistImportTrack track : tracks) {
             if (track == null) {
@@ -410,10 +426,11 @@ public class ClientMediaRepository {
             if (url.isBlank()) {
                 continue;
             }
-            String mediaId = SharedMediaSnapshot.idForUrl(url);
+            String mediaId = SharedMediaSnapshot.idForOwnerUrl(ownerId, url);
             SharedMediaSnapshot.MediaEntry mediaEntry = snapshot.library.get(mediaId);
             if (mediaEntry == null) {
                 mediaEntry = snapshot.upsertMedia(
+                        ownerId,
                         url,
                         safe(track.title),
                         safe(track.artist),
@@ -547,7 +564,7 @@ public class ClientMediaRepository {
 
         SharedMediaSnapshot.MediaEntry mediaEntry = findByUrl(normalizedUrl);
         if (mediaEntry == null) {
-            mediaEntry = snapshot.upsertMedia(normalizedUrl, "", "", "", List.of(), true);
+            mediaEntry = snapshot.upsertMedia(localPlayerIdentity().playerId(), normalizedUrl, "", "", "", List.of(), true);
         }
         QueueItem queueItem = new QueueItem(newQueueItemId(), mediaEntry.id);
         int insertIndex = currentIndex < 0 ? queueState.queueItems.size() : Math.max(0, currentIndex);
@@ -891,12 +908,13 @@ public class ClientMediaRepository {
         }
 
         if (payload.entries != null) {
+            String ownerId = localPlayerIdentity().playerId();
             for (QueueMediaPayload queued : payload.entries) {
                 if (queued == null || queued.url == null || queued.url.isBlank()) {
                     continue;
                 }
 
-                SharedMediaSnapshot.MediaEntry existingEntry = snapshot.library.get(SharedMediaSnapshot.idForUrl(queued.url));
+                SharedMediaSnapshot.MediaEntry existingEntry = findByUrl(queued.url);
                 String resolvedTitle = safe(queued.title);
                 String resolvedArtist = safe(queued.artist);
                 String resolvedThumbnail = safe(queued.thumbnail);
@@ -910,6 +928,7 @@ public class ClientMediaRepository {
                     resolvedThumbnail = safe(existingEntry.thumbnail);
                 }
                 SharedMediaSnapshot.MediaEntry entry = snapshot.upsertMedia(
+                        ownerId,
                         queued.url,
                         resolvedTitle,
                         resolvedArtist,
