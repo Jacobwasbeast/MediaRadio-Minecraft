@@ -42,7 +42,8 @@ public class HumanoidModelMixin<T extends LivingEntity> {
 
         if (offHandRadio) {
             ModelPart arm = mainArm == HumanoidArm.RIGHT ? leftArm : rightArm;
-            float side = mainArm == HumanoidArm.RIGHT ? -1f : 1f;
+            // The offhand arm is opposite the main arm, so its outward side flips.
+            float side = mainArm == HumanoidArm.RIGHT ? 1f : -1f;
             if (offHandPlaceMode) {
                 // Lower carry pose in place mode.
                 arm.xRot = -0.95f + head.xRot * 0.10f;
