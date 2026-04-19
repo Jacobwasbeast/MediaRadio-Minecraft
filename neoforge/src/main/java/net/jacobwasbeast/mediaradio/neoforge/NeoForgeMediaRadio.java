@@ -2,30 +2,37 @@ package net.jacobwasbeast.mediaradio.neoforge;
 
 import net.blay09.mods.balm.api.Balm;
 import net.blay09.mods.balm.api.client.BalmClient;
+import net.blay09.mods.balm.neoforge.NeoForgeLoadContext;
 import net.jacobwasbeast.mediaradio.MediaRadio;
 import net.jacobwasbeast.mediaradio.client.MediaRadioClient;
 import net.jacobwasbeast.mediaradio.neoforge.client.NeoForgeConfigScreenIntegration;
+import net.jacobwasbeast.mediaradio.server.SharedMediaManager;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 @Mod(MediaRadio.MOD_ID)
 public class NeoForgeMediaRadio {
 
-    public NeoForgeMediaRadio(IEventBus modEventBus) {
-        Balm.initialize(MediaRadio.MOD_ID, modEventBus, MediaRadio::initialize);
+    public NeoForgeMediaRadio(IEventBus modEventBus, ModContainer modContainer) {
+        NeoForgeLoadContext context = new NeoForgeLoadContext(modEventBus);
+        Balm.initialize(MediaRadio.MOD_ID, context, MediaRadio::initialize);
         modEventBus.addListener(this::onCommonSetup);
+        NeoForge.EVENT_BUS.addListener((ServerTickEvent.Post event) -> SharedMediaManager.tickServer(event.getServer()));
         if (FMLEnvironment.dist == Dist.CLIENT) {
-            initializeClient(modEventBus);
+            initializeClient(context, modContainer);
         }
     }
 
-    private static void initializeClient(IEventBus modEventBus) {
-        BalmClient.initialize(MediaRadio.MOD_ID, modEventBus, MediaRadioClient::initialize);
-        NeoForgeConfigScreenIntegration.register();
+    private static void initializeClient(NeoForgeLoadContext context, ModContainer modContainer) {
+        BalmClient.initialize(MediaRadio.MOD_ID, context, MediaRadioClient::initialize);
+        NeoForgeConfigScreenIntegration.register(modContainer);
     }
 
     private void onCommonSetup(FMLCommonSetupEvent event) {

@@ -26,7 +26,7 @@ public class HumanoidModelMixin<T extends LivingEntity> {
     @Shadow
     public ModelPart head;
 
-    @Inject(method = "setupAnim(Lnet/minecraft/world/entity/LivingEntity;FFFFF)V", at = @At("TAIL"))
+    @Inject(method = "setupAnim(Lnet/minecraft/world/entity/LivingEntity;FFFFF)V", remap = false, at = @At("TAIL"))
     private void mediaradio$setupAnim(T livingEntity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch, CallbackInfo callbackInfo) {
         if (!(livingEntity instanceof Player player)) {
             return;

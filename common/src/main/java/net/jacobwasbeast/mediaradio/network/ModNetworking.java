@@ -34,9 +34,9 @@ public class ModNetworking {
 
     public static void initialize(BalmNetworking networking) {
         networking.registerClientboundPacket(
-                MediaRadio.id("shared_media"),
+                ClientboundSharedMediaMessage.TYPE,
                 ClientboundSharedMediaMessage.class,
-                ClientboundSharedMediaMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundSharedMediaMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -52,9 +52,9 @@ public class ModNetworking {
         );
 
         networking.registerClientboundPacket(
-                MediaRadio.id("radio_state"),
+                ClientboundRadioStateMessage.TYPE,
                 ClientboundRadioStateMessage.class,
-                ClientboundRadioStateMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundRadioStateMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -103,9 +103,9 @@ public class ModNetworking {
         );
 
         networking.registerClientboundPacket(
-                MediaRadio.id("radio_queue_chunk"),
+                ClientboundRadioQueueChunkMessage.TYPE,
                 ClientboundRadioQueueChunkMessage.class,
-                ClientboundRadioQueueChunkMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundRadioQueueChunkMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -138,9 +138,9 @@ public class ModNetworking {
         );
 
         networking.registerClientboundPacket(
-                MediaRadio.id("player_radio_context"),
+                ClientboundPlayerRadioContextMessage.TYPE,
                 ClientboundPlayerRadioContextMessage.class,
-                ClientboundPlayerRadioContextMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundPlayerRadioContextMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -157,9 +157,9 @@ public class ModNetworking {
         );
 
         networking.registerClientboundPacket(
-                MediaRadio.id("shared_media_chunk"),
+                ClientboundSharedMediaChunkMessage.TYPE,
                 ClientboundSharedMediaChunkMessage.class,
-                ClientboundSharedMediaChunkMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundSharedMediaChunkMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -176,9 +176,9 @@ public class ModNetworking {
         );
 
         networking.registerClientboundPacket(
-                MediaRadio.id("open_contraption_radio"),
+                ClientboundOpenContraptionRadioMessage.TYPE,
                 ClientboundOpenContraptionRadioMessage.class,
-                ClientboundOpenContraptionRadioMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundOpenContraptionRadioMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -195,9 +195,9 @@ public class ModNetworking {
         );
 
         networking.registerClientboundPacket(
-                MediaRadio.id("session_command_result"),
+                ClientboundSessionCommandResultMessage.TYPE,
                 ClientboundSessionCommandResultMessage.class,
-                ClientboundSessionCommandResultMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ClientboundSessionCommandResultMessage::new,
                 (player, message) -> {
                     if (!Balm.getProxy().isClient()) {
@@ -230,17 +230,17 @@ public class ModNetworking {
         );
 
         networking.registerServerboundPacket(
-                MediaRadio.id("shared_media_upload"),
+                ServerboundSharedMediaMessage.TYPE,
                 ServerboundSharedMediaMessage.class,
-                ServerboundSharedMediaMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ServerboundSharedMediaMessage::new,
                 (player, message) -> SharedMediaManager.handleClientSnapshotUpload(player, message.json())
         );
 
         networking.registerServerboundPacket(
-                MediaRadio.id("shared_media_upload_chunk"),
+                ServerboundSharedMediaChunkMessage.TYPE,
                 ServerboundSharedMediaChunkMessage.class,
-                ServerboundSharedMediaChunkMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ServerboundSharedMediaChunkMessage::new,
                 (player, message) -> SharedMediaManager.handleClientSnapshotUploadChunk(
                         player,
@@ -252,25 +252,25 @@ public class ModNetworking {
         );
 
         networking.registerServerboundPacket(
-                MediaRadio.id("radio_control"),
+                ServerboundRadioControlMessage.TYPE,
                 ServerboundRadioControlMessage.class,
-                ServerboundRadioControlMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ServerboundRadioControlMessage::new,
                 SharedMediaManager::handleRadioControl
         );
 
         networking.registerServerboundPacket(
-                MediaRadio.id("radio_queue_upload_chunk"),
+                ServerboundRadioQueueChunkMessage.TYPE,
                 ServerboundRadioQueueChunkMessage.class,
-                ServerboundRadioQueueChunkMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ServerboundRadioQueueChunkMessage::new,
                 SharedMediaManager::handleRadioQueueChunk
         );
 
         networking.registerServerboundPacket(
-                MediaRadio.id("radio_state_request"),
+                ServerboundRequestRadioStateMessage.TYPE,
                 ServerboundRequestRadioStateMessage.class,
-                ServerboundRequestRadioStateMessage::encode,
+                (buf, msg) -> msg.encode(buf),
                 ServerboundRequestRadioStateMessage::new,
                 SharedMediaManager::handleRadioStateRequest
         );

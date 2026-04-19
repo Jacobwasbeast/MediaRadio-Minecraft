@@ -2,6 +2,10 @@ package net.jacobwasbeast.mediaradio.network.message;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.jacobwasbeast.mediaradio.MediaRadio;
 
 public record ServerboundRadioQueueChunkMessage(
         BlockPos blockPos,
@@ -13,12 +17,12 @@ public record ServerboundRadioQueueChunkMessage(
         String chunkData,
         long knownRevision,
         long commandId
-) {
+) implements CustomPacketPayload {
     private static final int MAX_RADIO_ID = 256;
     private static final int MAX_TRANSFER_ID = 96;
     private static final int MAX_CHUNK_DATA = 12000;
 
-    public ServerboundRadioQueueChunkMessage(FriendlyByteBuf friendlyByteBuf) {
+    public ServerboundRadioQueueChunkMessage(RegistryFriendlyByteBuf friendlyByteBuf) {
         this(
                 friendlyByteBuf.readBoolean() ? friendlyByteBuf.readBlockPos() : null,
                 friendlyByteBuf.readUtf(MAX_RADIO_ID),
@@ -32,7 +36,7 @@ public record ServerboundRadioQueueChunkMessage(
         );
     }
 
-    public void encode(FriendlyByteBuf friendlyByteBuf) {
+    public void encode(RegistryFriendlyByteBuf friendlyByteBuf) {
         boolean hasBlockPos = blockPos != null;
         friendlyByteBuf.writeBoolean(hasBlockPos);
         if (hasBlockPos) {
@@ -47,4 +51,11 @@ public record ServerboundRadioQueueChunkMessage(
         friendlyByteBuf.writeLong(knownRevision);
         friendlyByteBuf.writeLong(commandId);
     }
+    public static final Type<ServerboundRadioQueueChunkMessage> TYPE = new Type<>(MediaRadio.id("radio_queue_upload_chunk"));
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
 }

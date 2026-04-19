@@ -1,6 +1,10 @@
 package net.jacobwasbeast.mediaradio.network.message;
 
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.jacobwasbeast.mediaradio.MediaRadio;
 
 public record ClientboundSessionCommandResultMessage(
         String radioId,
@@ -9,11 +13,11 @@ public record ClientboundSessionCommandResultMessage(
         boolean accepted,
         Reason reason,
         ServerboundRequestRadioStateMessage.Context context
-) {
+) implements CustomPacketPayload {
     private static final int MAX_RADIO_ID = 256;
     private static final int MAX_SESSION_ID = 256;
 
-    public ClientboundSessionCommandResultMessage(FriendlyByteBuf friendlyByteBuf) {
+    public ClientboundSessionCommandResultMessage(RegistryFriendlyByteBuf friendlyByteBuf) {
         this(
                 friendlyByteBuf.readUtf(MAX_RADIO_ID),
                 friendlyByteBuf.readUtf(MAX_SESSION_ID),
@@ -24,7 +28,7 @@ public record ClientboundSessionCommandResultMessage(
         );
     }
 
-    public void encode(FriendlyByteBuf friendlyByteBuf) {
+    public void encode(RegistryFriendlyByteBuf friendlyByteBuf) {
         friendlyByteBuf.writeUtf(radioId == null ? "" : radioId, MAX_RADIO_ID);
         friendlyByteBuf.writeUtf(sessionId == null ? "" : sessionId, MAX_SESSION_ID);
         friendlyByteBuf.writeLong(Math.max(0L, serverRevision));
@@ -39,4 +43,11 @@ public record ClientboundSessionCommandResultMessage(
         DUPLICATE_COMMAND,
         UNAUTHORIZED
     }
+    public static final Type<ClientboundSessionCommandResultMessage> TYPE = new Type<>(MediaRadio.id("session_command_result"));
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
 }

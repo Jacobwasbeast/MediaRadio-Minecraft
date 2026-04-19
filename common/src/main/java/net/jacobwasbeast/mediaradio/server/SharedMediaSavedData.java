@@ -1,5 +1,6 @@
 package net.jacobwasbeast.mediaradio.server;
 
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -17,7 +18,10 @@ public class SharedMediaSavedData extends SavedData {
 
     public static SharedMediaSavedData get(MinecraftServer server) {
         ServerLevel level = server.overworld();
-        return level.getDataStorage().computeIfAbsent(SharedMediaSavedData::load, SharedMediaSavedData::new, DATA_NAME);
+        return level.getDataStorage().computeIfAbsent(
+                new SavedData.Factory<SharedMediaSavedData>(SharedMediaSavedData::new, (tag, registries) -> load(tag), null),
+                DATA_NAME
+        );
     }
 
     public static SharedMediaSavedData load(CompoundTag tag) {
@@ -35,7 +39,7 @@ public class SharedMediaSavedData extends SavedData {
     }
 
     @Override
-    public CompoundTag save(CompoundTag compoundTag) {
+    public CompoundTag save(CompoundTag compoundTag, HolderLookup.Provider registries) {
         String json = snapshotJson == null ? "" : snapshotJson;
         compoundTag.putByteArray(TAG_SNAPSHOT_BYTES, json.getBytes(StandardCharsets.UTF_8));
         compoundTag.remove(TAG_SNAPSHOT_JSON);

@@ -43,10 +43,49 @@ sourceSets.main.resources.srcDir 'src/generated/resources'
 configurations {
     shadowIn
     implementation.extendsFrom shadowIn
+    devAudioLibs {
+        canBeResolved = true
+    }
+}
+
+// Merge lavaplayer + lavalink-youtube into one jar for dev runs.
+// NeoForge's JPMS-based ModuleClassLoader rejects split packages, and these libraries
+// legitimately share packages across artifacts, so they must live in a single module.
+tasks.register('mergeDevAudioLibs', Jar) {
+    archiveBaseName.set("${mod_id}-dev-audio-libs")
+    archiveVersion.set("")
+    destinationDirectory.set(layout.buildDirectory.dir("devAudioLibs"))
+    from {
+        configurations.devAudioLibs.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/MANIFEST.MF'
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    exclude 'module-info.class'
+}
+
+afterEvaluate {
+    dependencies.add('additionalRuntimeClasspath', files(tasks.named('mergeDevAudioLibs').map { it.archiveFile }))
+    tasks.matching { it.name.startsWith('run') || it.name.startsWith('prepareRun') }.configureEach {
+        dependsOn('mergeDevAudioLibs')
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        force 'org.apache.httpcomponents:httpclient:4.5.14'
+        force 'org.apache.httpcomponents:httpcore:4.4.16'
+    }
 }
 
 dependencies {
     annotationProcessor "org.spongepowered:mixin:${mixin_version}:processor"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.add("-AdefaultObfuscationEnv=named:mojang")
 }
 
 jar {

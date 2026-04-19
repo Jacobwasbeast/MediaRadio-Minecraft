@@ -17,7 +17,7 @@ public abstract class SoundOptionsScreenMixin extends Screen {
         super(title);
     }
 
-    @Inject(method = "init", at = @At("TAIL"))
+    @Inject(method = "addOptions()V", remap = false, at = @At("TAIL"))
     private void mediaradio$addSettingsButton(CallbackInfo callbackInfo) {
         ClientAudioSettings settings = ClientAudioSettings.get();
         settings.load();

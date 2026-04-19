@@ -1,6 +1,10 @@
 package net.jacobwasbeast.mediaradio.network.message;
 
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.jacobwasbeast.mediaradio.MediaRadio;
 
 public record ClientboundRadioStateMessage(
         String radioId,
@@ -17,13 +21,13 @@ public record ClientboundRadioStateMessage(
         boolean forcePositionSync,
         boolean seekEvent,
         boolean playing
-) {
+) implements CustomPacketPayload {
     private static final int MAX_PACKET_STRING = 262144;
     private static final int MAX_TITLE_ARTIST = 4096;
     private static final int MAX_RADIO_ID = 256;
     private static final int MAX_SESSION_ID = 256;
 
-    public ClientboundRadioStateMessage(FriendlyByteBuf friendlyByteBuf) {
+    public ClientboundRadioStateMessage(RegistryFriendlyByteBuf friendlyByteBuf) {
         this(
                 friendlyByteBuf.readUtf(MAX_RADIO_ID),
                 friendlyByteBuf.readUtf(MAX_SESSION_ID),
@@ -42,7 +46,7 @@ public record ClientboundRadioStateMessage(
         );
     }
 
-    public void encode(FriendlyByteBuf friendlyByteBuf) {
+    public void encode(RegistryFriendlyByteBuf friendlyByteBuf) {
         friendlyByteBuf.writeUtf(radioId == null ? "" : radioId, MAX_RADIO_ID);
         friendlyByteBuf.writeUtf(sessionId == null ? "" : sessionId, MAX_SESSION_ID);
         friendlyByteBuf.writeLong(Math.max(0L, revision));
@@ -58,4 +62,11 @@ public record ClientboundRadioStateMessage(
         friendlyByteBuf.writeBoolean(seekEvent);
         friendlyByteBuf.writeBoolean(playing);
     }
+    public static final Type<ClientboundRadioStateMessage> TYPE = new Type<>(MediaRadio.id("radio_state"));
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
 }

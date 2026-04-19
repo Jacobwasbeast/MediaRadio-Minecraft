@@ -10,12 +10,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(SoundEngine.class)
 public class SoundEngineMixin {
 
-    @Inject(method = "reload", at = @At("HEAD"))
+    @Inject(method = "reload", remap = false, at = @At("HEAD"))
     private void mediaradio$onReload(CallbackInfo callbackInfo) {
         ClientAudioEngine.getInstance().stopAll();
     }
 
-    @Inject(method = "stopAll", at = @At("HEAD"))
+    @Inject(method = "stopAll", remap = false, at = @At("HEAD"))
     private void mediaradio$onStopAll(CallbackInfo callbackInfo) {
         ClientAudioEngine.getInstance().stopAll();
     }

@@ -175,7 +175,7 @@ public class RadioBlockEntityRenderer implements BlockEntityRenderer<RadioBlockE
         for (int i = 0; i < lines.size(); i++) {
             DisplayLine line = lines.get(i);
             float y = startY + (i * LINE_HEIGHT);
-            font.drawInBatch(line.text(), textX, y, line.setColor(), true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
+            font.drawInBatch(line.text(), textX, y, line.color(), true, poseStack.last().pose(), bufferSource, Font.DisplayMode.POLYGON_OFFSET, 0, packedLight);
         }
     }
 

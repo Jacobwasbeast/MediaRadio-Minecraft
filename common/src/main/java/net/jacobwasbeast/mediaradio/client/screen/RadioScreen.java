@@ -33,6 +33,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class RadioScreen extends Screen {
 
+    @Override
+    protected void renderBlurredBackground(float partialTick) {
+    }
+
     private static final int PANEL_WIDTH = 620;
     private static final int PANEL_HEIGHT = 352;
     private static final int HEADER_HEIGHT = 42;
@@ -222,31 +226,6 @@ public class RadioScreen extends Screen {
                 blockVolume = blockEntity.getVolume();
             }
             syncBlockRadioContext();
-        }
-
-        if (urlInput != null) {
-            urlInput.tick();
-        }
-        if (titleInput != null) {
-            titleInput.tick();
-        }
-        if (artistInput != null) {
-            artistInput.tick();
-        }
-        if (thumbnailInput != null) {
-            thumbnailInput.tick();
-        }
-        if (playlistNameInput != null) {
-            playlistNameInput.tick();
-        }
-        if (playlistInviteInput != null) {
-            playlistInviteInput.tick();
-        }
-        if (importPlaylistSourceInput != null) {
-            importPlaylistSourceInput.tick();
-        }
-        if (importPlaylistNameInput != null) {
-            importPlaylistNameInput.tick();
         }
 
         clampSelections();
@@ -1046,10 +1025,10 @@ public class RadioScreen extends Screen {
     }
 
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double deltaY) {
+    public boolean mouseScrolled(double mouseX, double mouseY, double deltaX, double deltaY) {
         int step = deltaY > 0.0d ? -1 : deltaY < 0.0d ? 1 : 0;
         if (step == 0) {
-            return super.mouseScrolled(mouseX, mouseY, deltaY);
+            return super.mouseScrolled(mouseX, mouseY, deltaX, deltaY);
         }
 
         if (tab == Tab.NOW
@@ -1108,7 +1087,7 @@ public class RadioScreen extends Screen {
                     playlistImportScroll = clampScroll(playlistImportScroll + step, size, playlistImportVisibleRows(listH));
                     return true;
                 }
-                return super.mouseScrolled(mouseX, mouseY, deltaY);
+                return super.mouseScrolled(mouseX, mouseY, deltaX, deltaY);
             }
 
             int listY = contentY() + 56;
@@ -1132,7 +1111,7 @@ public class RadioScreen extends Screen {
             }
         }
 
-        return super.mouseScrolled(mouseX, mouseY, deltaY);
+        return super.mouseScrolled(mouseX, mouseY, deltaX, deltaY);
     }
 
     private void playFromInputs() {

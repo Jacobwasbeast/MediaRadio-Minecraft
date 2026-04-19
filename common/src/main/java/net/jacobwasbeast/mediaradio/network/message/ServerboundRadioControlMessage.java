@@ -2,6 +2,10 @@ package net.jacobwasbeast.mediaradio.network.message;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.ResourceLocation;
+import net.jacobwasbeast.mediaradio.MediaRadio;
 
 public record ServerboundRadioControlMessage(
         BlockPos blockPos,
@@ -17,11 +21,11 @@ public record ServerboundRadioControlMessage(
         long trackDurationMs,
         long knownRevision,
         long commandId
-) {
+) implements CustomPacketPayload {
     private static final int MAX_PACKET_STRING = 32767;
     private static final int MAX_TITLE_ARTIST = 4096;
 
-    public ServerboundRadioControlMessage(FriendlyByteBuf friendlyByteBuf) {
+    public ServerboundRadioControlMessage(RegistryFriendlyByteBuf friendlyByteBuf) {
         this(
                 friendlyByteBuf.readBoolean() ? friendlyByteBuf.readBlockPos() : null,
                 friendlyByteBuf.readUtf(MAX_PACKET_STRING),
@@ -145,7 +149,7 @@ public record ServerboundRadioControlMessage(
         this(blockPos, radioId, context, action, url, title, artist, thumbnail, volume, positionMs, trackDurationMs, knownRevision, -1L);
     }
 
-    public void encode(FriendlyByteBuf friendlyByteBuf) {
+    public void encode(RegistryFriendlyByteBuf friendlyByteBuf) {
         boolean hasBlockPos = blockPos != null;
         friendlyByteBuf.writeBoolean(hasBlockPos);
         if (hasBlockPos) {
@@ -180,4 +184,11 @@ public record ServerboundRadioControlMessage(
         SEEK,
         SYNC_RUNTIME
     }
+    public static final Type<ServerboundRadioControlMessage> TYPE = new Type<>(MediaRadio.id("radio_control"));
+
+    @Override
+    public Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
 }

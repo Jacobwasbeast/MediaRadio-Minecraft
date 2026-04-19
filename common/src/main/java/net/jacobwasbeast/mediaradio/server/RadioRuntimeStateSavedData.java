@@ -2,6 +2,7 @@ package net.jacobwasbeast.mediaradio.server;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -25,7 +26,10 @@ public class RadioRuntimeStateSavedData extends SavedData {
 
     public static RadioRuntimeStateSavedData get(MinecraftServer server) {
         ServerLevel level = server.overworld();
-        return level.getDataStorage().computeIfAbsent(RadioRuntimeStateSavedData::load, RadioRuntimeStateSavedData::new, DATA_NAME);
+        return level.getDataStorage().computeIfAbsent(
+                new SavedData.Factory<RadioRuntimeStateSavedData>(RadioRuntimeStateSavedData::new, (tag, registries) -> load(tag), null),
+                DATA_NAME
+        );
     }
 
     public static RadioRuntimeStateSavedData load(CompoundTag tag) {
@@ -59,7 +63,7 @@ public class RadioRuntimeStateSavedData extends SavedData {
     }
 
     @Override
-    public CompoundTag save(CompoundTag tag) {
+    public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
         RuntimeModel model = new RuntimeModel();
         model.states = radioStates;
         String runtimeJson = GSON.toJson(model);
